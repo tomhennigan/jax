@@ -154,7 +154,6 @@ class CoreTest(jtu.JaxTestCase):
     assert tree_multimap(f, xs, ys) == zs
     try:
       tree_multimap(f, xs, ys_bad)
-      assert False
     except TypeError:
       pass
 

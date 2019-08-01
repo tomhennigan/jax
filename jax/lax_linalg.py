@@ -107,7 +107,7 @@ def cholesky_jvp_rule(primals, tangents):
 def cholesky_batching_rule(batched_args, batch_dims):
   x, = batched_args
   bd, = batch_dims
-  x = batching.bdim_at_front(x, bd)
+  x = batching.moveaxis(x, bd, 0)
   return cholesky(x), 0
 
 cholesky_p = standard_unop(_float | _complex, 'cholesky')
@@ -183,7 +183,7 @@ def eig_cpu_translation_rule(c, operand):
 def eig_batching_rule(batched_args, batch_dims):
   x, = batched_args
   bd, = batch_dims
-  x = batching.bdim_at_front(x, bd)
+  x = batching.moveaxis(x, bd, 0)
   return eig_p.bind(x), 0
 
 eig_p = Primitive('eig')
@@ -259,7 +259,7 @@ def eigh_jvp_rule(primals, tangents, lower):
 def eigh_batching_rule(batched_args, batch_dims, lower):
   x, = batched_args
   bd, = batch_dims
-  x = batching.bdim_at_front(x, bd)
+  x = batching.moveaxis(x, bd, 0)
   return eigh_p.bind(x, lower=lower), 0
 
 eigh_p = Primitive('eigh')
@@ -315,7 +315,7 @@ def triangular_solve_transpose_rule(
   # Triangular solve is linear in its first argument and nonlinear in its second
   # argument, similar to `div`. We need both a JVP rule and a transpose rule
   # for the first argument.
-  assert a is not None and b is None
+  assert a is not ad.undefined_primal and b is ad.undefined_primal
   cotangent_b = triangular_solve(a, cotangent, left_side, lower,
                                  not transpose_a, conjugate_a, unit_diagonal)
   return [None, cotangent_b]
@@ -328,8 +328,8 @@ def triangular_solve_batching_rule(batched_args, batch_dims, left_side,
   bx, by = batch_dims
   size = next(t.shape[i] for t, i in zip(batched_args, batch_dims)
               if i is not None)
-  x = batching.bdim_at_front(x, bx, size, force_broadcast=True)
-  y = batching.bdim_at_front(y, by, size, force_broadcast=True)
+  x = batching.bdim_at_front(x, bx, size)
+  y = batching.bdim_at_front(y, by, size)
   return triangular_solve(x, y, left_side=left_side, lower=lower,
                           transpose_a=transpose_a, conjugate_a=conjugate_a,
                           unit_diagonal=unit_diagonal), 0
@@ -520,7 +520,7 @@ def _lu_jvp_rule(primals, tangents):
 def _lu_batching_rule(batched_args, batch_dims):
   x, = batched_args
   bd, = batch_dims
-  x = batching.bdim_at_front(x, bd)
+  x = batching.moveaxis(x, bd, 0)
   return lu_p.bind(x), 0
 
 def _lu_cpu_translation_rule(c, operand):
@@ -617,7 +617,7 @@ def qr_jvp_rule(primals, tangents, full_matrices):
 def qr_batching_rule(batched_args, batch_dims, full_matrices):
   x, = batched_args
   bd, = batch_dims
-  x = batching.bdim_at_front(x, bd)
+  x = batching.moveaxis(x, bd, 0)
   return qr_p.bind(x, full_matrices=full_matrices), 0
 
 qr_p = Primitive('qr')
@@ -706,7 +706,7 @@ def svd_cpu_translation_rule(c, operand, full_matrices, compute_uv):
 def svd_batching_rule(batched_args, batch_dims, full_matrices, compute_uv):
   x, = batched_args
   bd, = batch_dims
-  x = batching.bdim_at_front(x, bd)
+  x = batching.moveaxis(x, bd, 0)
   return svd_p.bind(x, full_matrices=full_matrices, compute_uv=compute_uv), 0
 
 svd_p = Primitive('svd')

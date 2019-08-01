@@ -108,7 +108,7 @@ def vjp(traceable, primals, has_aux=False):
   def vjp_(*cts):
     cts = tuple(map(ignore_consts, cts, pvals))
     dummy_primals_and_cts = (core.unit,) * len(cts) + cts
-    dummy_args = (None,) * len(jaxpr.invars)
+    dummy_args = (undefined_primal,) * len(jaxpr.invars)
     _, arg_cts = backward_pass(jaxpr, consts, (), dummy_args, dummy_primals_and_cts)
     arg_cts = arg_cts[len(primals):]
     return map(instantiate_zeros, primals, arg_cts)
@@ -149,10 +149,10 @@ def backward_pass(jaxpr, consts, freevar_vals, args, cotangents_in):
     if type(v) is Literal:
       return v.val
     else:
-      return primal_env.get(v)
+      return primal_env.get(v, undefined_primal)
 
   def write_primal(v, val):
-    if val is not None:
+    if val is not undefined_primal:
       primal_env[v] = val
 
   primal_env = {}
@@ -182,6 +182,12 @@ def backward_pass(jaxpr, consts, freevar_vals, args, cotangents_in):
   freevar_cts = map(read_cotangent, jaxpr.freevars)
   cotangents_out = map(read_cotangent, jaxpr.invars)
   return freevar_cts, cotangents_out
+
+class UndefinedPrimal(object): pass
+undefined_primal = UndefinedPrimal()
+register_pytree_node(UndefinedPrimal,
+                     lambda z: ((), None),
+                     lambda *_: undefined_primal)
 
 def get_primitive_transpose(p):
   try:
@@ -215,6 +221,7 @@ class JVPTrace(Trace):
     return JVPTracer(self, primal_out, tangent_out)
 
   def process_call(self, call_primitive, f, tracers, params):
+    assert call_primitive.multiple_results
     primals = [t.primal for t in tracers]
     tangents = [t.tangent for t in tracers]
     nonzero_tangents, in_tree_def = tree_flatten(tangents)
@@ -359,7 +366,8 @@ def defvjp_argnums(prim, custom_vjp):
   fun_lin_p = core.Primitive('{name}_lin'.format(name=name))
   fun_lin_p.def_abstract_eval(lambda c, r, ts, in_aval, out_pv, vjp_jaxpr: in_aval)
   def fun_lin_transpose(ct, out_const, residuals, ts, in_aval, out_pv, vjp_jaxpr):
-    assert ts is None and out_const is not None and residuals is not None
+    assert (ts is undefined_primal and out_const is not undefined_primal
+            and residuals is not undefined_primal)
     ans = core.eval_jaxpr(vjp_jaxpr, residuals, (), ct)
     out = pe.merge_pvals(ans, pe.PartialVal((out_pv, out_const)))
     return [None, None, out]
@@ -397,8 +405,8 @@ def defbilinear_broadcasting(bcast, prim, lhs_rule, rhs_rule):
 defbilinear = partial(defbilinear_broadcasting, lambda g, x: g)
 
 def bilinear_transpose(lhs_rule, rhs_rule, cotangent, x, y, **kwargs):
-  assert (x is None) ^ (y is None)
-  if x is None:
+  assert (x is undefined_primal) ^ (y is undefined_primal)
+  if x is undefined_primal:
     out = zero if cotangent is zero else lhs_rule(cotangent, y, **kwargs)
     return out, None
   else:

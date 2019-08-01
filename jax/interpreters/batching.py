@@ -27,7 +27,7 @@ from six.moves import reduce
 from .. import core
 from ..core import Trace, Tracer, new_master
 from ..abstract_arrays import ShapedArray, make_shaped_array, array_types, raise_to_shaped
-from ..ad_util import add_jaxvals_p, zeros_like_p, zeros_like_jaxval
+from ..ad_util import add_jaxvals, add_jaxvals_p, zeros_like_jaxval, zeros_like_p
 from ..linear_util import transformation, transformation_with_aux, wrap_init
 from ..util import unzip2, partial, safe_map
 from . import xla
@@ -36,189 +36,121 @@ from . import partial_eval as pe
 map = safe_map
 
 
-def batch(fun, in_vals, in_dims, out_dim_dst):
-  sizes = reduce(set.union, map(dimsize, in_dims, in_vals))
-  if not sizes:
-    return fun.call_wrapped(*in_vals), None  # no mapped dimensions
-  elif len(sizes) == 1:
-    sz = sizes.pop()
-    return batch_transform(fun, sz, in_dims, out_dim_dst).call_wrapped(in_vals)
-  else:
-    raise TypeError("got inconsistent map dimension sizes: {}".format(sizes))
+def batch(fun, in_vals, in_dims, out_dims):
+  size, = {x.shape[d] for x, d in zip(in_vals, in_dims) if d is not not_mapped}
+  return batch_transform(fun, size, in_dims, out_dims).call_wrapped(in_vals)
 
 
 @transformation
-def batch_transform(size, in_dims, out_dim_dst, vals):
+def batch_transform(size, in_dims, out_dim_dests, vals):
   with new_master(BatchTrace) as master:
     trace = BatchTrace(master, core.cur_sublevel())
     in_tracers = map(partial(BatchTracer, trace), vals, in_dims)
-    ans = yield in_tracers, {}
-    out_tracer = trace.full_raise(ans)
-    out_val, out_dim = out_tracer.val, out_tracer.batch_dim
-    del master, out_tracer
-  yield moveaxis(size, out_dim_dst, out_dim, out_val)
+    outs = yield in_tracers, {}
+    out_tracers = map(trace.full_raise, outs)
+    out_vals, out_dims = unzip2((t.val, t.batch_dim) for t in out_tracers)
+    del master, out_tracers
+  yield map(partial(matchaxis, size), out_dims, out_dim_dests(), out_vals)
 
 
 @transformation_with_aux
 def batch_subtrace(master, dims, *vals):
   trace = BatchTrace(master, core.cur_sublevel())
-  ans = yield map(partial(BatchTracer, trace), vals, dims), {}
-  out_tracer = trace.full_raise(ans)
-  out_val, out_dim = out_tracer.val, out_tracer.batch_dim
-  yield out_val, out_dim
+  outs = yield map(partial(BatchTracer, trace), vals, dims), {}
+  out_tracers = map(trace.full_raise, outs)
+  yield unzip2((t.val, t.batch_dim) for t in out_tracers)
 
 
 ### tracer
 
+# class NotMapped(object): pass
+# not_mapped = NotMapped
+NotMapped = type(None)
+not_mapped = None
 
 class BatchTracer(Tracer):
   __slots__ = ['val', 'batch_dim']
 
   def __init__(self, trace, val, batch_dim):
-    assert core.skip_checks or type(batch_dim) in (int, tuple, type(None))
+    assert core.skip_checks or type(batch_dim) in (int, NotMapped)
     self.trace = trace
     self.val = val
     self.batch_dim = batch_dim
 
   @property
   def aval(self):
-    batched_aval = get_aval(self.val)
-    return remove_batch_dim_from_aval(self.batch_dim, batched_aval)
-
-  def unpack(self):
-    if self.batch_dim is None:
-      return tuple(self.val)
+    aval = raise_to_shaped(core.get_aval(self.val))
+    if self.batch_dim is not_mapped:
+      return aval
     else:
-      t = type(self.batch_dim)
-      if t is tuple:
-        dims = list(self.batch_dim)
-      elif t is int:
-        dims = [self.batch_dim] * len(self.val)
-      else:
-        raise TypeError(self.batch_dim)
-      return map(partial(BatchTracer, self.trace), self.val, dims)
+      assert 0 <= self.batch_dim < aval.ndim
+      new_shape = tuple(onp.delete(aval.shape, self.batch_dim))
+      return ShapedArray(new_shape, aval.dtype)
 
   def full_lower(self):
-    if self.batch_dim is None:
+    if self.batch_dim is not_mapped:
       return core.full_lower(self.val)
     else:
       return self
 
 class BatchTrace(Trace):
   def pure(self, val):
-    return BatchTracer(self, val, None)
+    return BatchTracer(self, val, not_mapped)
 
   def lift(self, val):
-    return BatchTracer(self, val, None)
+    return BatchTracer(self, val, not_mapped)
 
   def sublift(self, val):
     return BatchTracer(self, val.val, val.batch_dim)
 
   def process_primitive(self, primitive, tracers, params):
     vals_in, dims_in = unzip2((t.val, t.batch_dim) for t in tracers)
-    if all(bdim is None for bdim in dims_in):
+    if all(bdim is not_mapped for bdim in dims_in):
       return primitive.bind(*vals_in, **params)
     else:
       # TODO(mattjj,phawkins): if no rule implemented, could vmap-via-map here
       batched_primitive = get_primitive_batcher(primitive)
       val_out, dim_out = batched_primitive(vals_in, dims_in, **params)
-      return BatchTracer(self, val_out, dim_out)
+      if primitive.multiple_results:
+        return map(partial(BatchTracer, self), val_out, dim_out)
+      else:
+        return BatchTracer(self, val_out, dim_out)
 
   def process_call(self, call_primitive, f, tracers, params):
+    assert call_primitive.multiple_results
     if call_primitive in pe.map_primitives:
       return self.process_map(call_primitive, f, tracers, params)
     vals, dims = unzip2((t.val, t.batch_dim) for t in tracers)
-    if all(bdim is None for bdim in dims):
+    if all(bdim is not_mapped for bdim in dims):
       return call_primitive.bind(f, *vals, **params)
     else:
-      f, dim_out = batch_subtrace(f, self.master, dims)
-      val_out = call_primitive.bind(f, *vals, **params)
-      return BatchTracer(self, val_out, dim_out())
+      f, dims_out = batch_subtrace(f, self.master, dims)
+      vals_out = call_primitive.bind(f, *vals, **params)
+      return [BatchTracer(self, v, d) for v, d in zip(vals_out, dims_out())]
 
   def process_map(self, map_primitive, f, tracers, params):
     vals, dims = unzip2((t.val, t.batch_dim) for t in tracers)
-    if all(dim is None for dim in dims):
+    if all(dim is not_mapped for dim in dims):
       return map_primitive.bind(f, *vals, **params)
     else:
-      size, = reduce(set.union, map(dimsize, dims, vals))
+      size, = reduce(set.union, (x.shape[d] for x, d in zip(vals, dims)))
       is_batched = tuple(map(where_batched, dims))
       vals = map(partial(instantiate_bdim, size, 1), is_batched, dims, vals)
       dims = tuple(map(partial(bools_to_bdims, 0), is_batched))
-      f, dim_out = batch_subtrace(f, self.master, dims)
-      val_out = map_primitive.bind(f, *vals, **params)
-      return BatchTracer(self, val_out, increment_bdim(dim_out()))
+      f, dims_out = batch_subtrace(f, self.master, dims)
+      vals_out = map_primitive.bind(f, *vals, **params)
+      return [BatchTracer(self, v, d) for v, d in zip(vals_out, dims_out())]
 
-  def post_process_call(self, call_primitive, out_tracer, params):
-    val, dim = out_tracer.val, out_tracer.batch_dim
+  def post_process_call(self, call_primitive, out_tracers, params):
+    vals, dims = unzip2((t.val, t.batch_dim) for t in out_tracers)
     master = self.master
     def todo(x):
       trace = BatchTrace(master, core.cur_sublevel())
-      return BatchTracer(trace, x, dim)
-    return val, todo
-
-  def pack(self, tracers):
-    vals, dims = unzip2((t.val, t.batch_dim) for t in tracers)
-    return BatchTracer(self, pack(vals), tuple(dims))
-
-
-### abstract values
-
-
-def get_aval(x):
-  if isinstance(x, Tracer):
-    return raise_to_shaped(x.aval)
-  else:
-    return shaped_aval(x)
-
-def shaped_aval(x):
-  try:
-    return pytype_aval_mappings[type(x)](x)
-  except KeyError:
-    raise TypeError("{} is not a valid type for batching".format(type(x)))
-
-def remove_batch_dim_from_aval(bdim, aval):
-  t = type(aval)
-  if t is AbstractTuple:
-    if type(bdim) is tuple:
-      return AbstractTuple(map(remove_batch_dim_from_aval, bdim, aval))
-    else:
-      return AbstractTuple(map(partial(remove_batch_dim_from_aval, bdim), aval))
-  elif t is ShapedArray:
-    if bdim is None:
-      return ShapedArray(aval.shape, aval.dtype)
-    else:
-      assert 0 <= bdim < aval.ndim
-      unbatched_shape = tuple(onp.delete(aval.shape, bdim))
-      return ShapedArray(unbatched_shape, aval.dtype)
-  else:
-    raise TypeError(t)
-
-def add_batch_dim_to_aval(bdim, size, aval):
-  t = type(aval)
-  if t is AbstractTuple:
-    if type(bdim) is tuple:
-      return AbstractTuple(map(add_batch_dim_to_aval, bdim, size, aval))
-    else:
-      return AbstractTuple(map(partial(add_batch_dim_to_aval, bdim, size), aval))
-  elif t is ShapedArray:
-    if bdim is None:
-      return ShapedArray(aval.shape, aval.dtype)
-    else:
-      assert 0 <= bdim <= aval.ndim
-      batched_shape = tuple(
-        onp.insert(onp.asarray(aval.shape, onp.intp), bdim, size))
-      return ShapedArray(batched_shape, aval.dtype)
-  else:
-    raise TypeError(t)
-
-pytype_aval_mappings = {}
-
-for t in it.chain(array_types, [xla.DeviceArray]):
-  pytype_aval_mappings[t] = make_shaped_array
+      return map(partial(BatchTracer, trace), x, dims)
+    return vals, todo
 
 
 ### primitives
-
 
 primitive_batchers = {}
 
@@ -239,11 +171,24 @@ def vectorized_batcher(prim, batched_args, batch_dims, **params):
 def defbroadcasting(prim):
   primitive_batchers[prim] = partial(broadcast_batcher, prim)
 
-def broadcast_batcher(prim, batched_args, batch_dims, **params):
-  args = map(bdim_at_front, batched_args, batch_dims)
-  ndim = max(map(onp.ndim, args))  # special case to handle scalar broadcasting
-  args = map(partial(handle_scalar_broadcasting, ndim), args, batch_dims)
-  return prim.bind(*args, **params), 0
+def broadcast_batcher(prim, args, dims, **params):
+  shapes = {(x.shape, d) for x, d in zip(args, dims) if onp.ndim(x)}
+  if len(shapes) == 1:
+    # if there's only agreeing batch dims and scalars, just call the primitive
+    d = next(d for d in dims if d is not not_mapped)
+    return prim.bind(*args, **params), d
+  else:
+    size, = {shape[d] for shape, d in shapes if d is not not_mapped}
+    args = [bdim_at_front(x, d, size) for x, d in zip(args, dims)]
+    ndim = max(onp.ndim(x) for x in args)  # special-case scalar broadcasting
+    args = [_handle_scalar_broadcasting(ndim, x, d) for x, d in zip(args, dims)]
+    return prim.bind(*args, **params), 0
+
+def _handle_scalar_broadcasting(nd, x, d):
+  if d is not_mapped or nd == onp.ndim(x):
+    return x
+  else:
+    return x.reshape(x.shape + (1,) * (nd - onp.ndim(x)))
 
 def defreducer(prim):
   primitive_batchers[prim] = partial(reducer_batcher, prim)
@@ -262,15 +207,17 @@ def reducer_batcher(prim, batched_args, batch_dims, axes, **params):
 def add_batched(batched_args, batch_dims):
   bdx, bdy = batch_dims
   x, y = batched_args
-  x_aval, y_aval = map(get_aval, batched_args)
-  assert core.skip_checks or x_aval == y_aval
-  if bdx == bdy or x_aval == AbstractTuple(()):
-    return add_jaxvals_p.bind(x, y), bdx
+  if bdx == bdy or core.get_aval(x) == core.abstract_unit:
+    return add_jaxvals(x, y), bdx
+  elif bdx is not_mapped:
+    x = broadcast(x, y.shape[bdy], bdy)
+    return add_jaxvals(x, y), bdy
+  elif bdy is not_mapped:
+    y = broadcast(y, x.shape[bdx], bdx)
+    return add_jaxvals(x, y), bdx
   else:
-    sz = (dimsize(bdx, x) | dimsize(bdy, y)).pop()
-    move_bdim = partial(bdim_at_front, broadcast_size=sz, force_broadcast=True)
-    x, y = map(move_bdim, batched_args, batch_dims)
-    return add_jaxvals_p.bind(x, y), 0
+    x = moveaxis(x, bdx, bdy)
+    return add_jaxvals(x, y), bdy
 primitive_batchers[add_jaxvals_p] = add_batched
 
 def zeros_like_batched(batched_args, batch_dims):
@@ -290,122 +237,64 @@ defvectorized(xla.device_put_p)
 # almost works, except for broadcast, for which raw numpy.ndarrays don't have a
 # method. To handle that case, the `broadcast` function uses a try/except.
 
-
-def bdim_at_front(x, bdim, broadcast_size=1, force_broadcast=False):
-  return moveaxis(broadcast_size, 0, bdim, x, force_broadcast=force_broadcast)
-
-def move_dim_to_front(x, dim):
-  assert dim is not None
-  return moveaxis(None, 0, dim, x)
-
-def dimsize(dim, x):
-  return _dimsize(dim, get_aval(x), x)
-
-def _dimsize(dim, aval, x):
-  if type(aval) is AbstractTuple:
-    if type(dim) is tuple:
-      return reduce(set.union, map(_dimsize, dim, aval, x), set())
-    elif type(dim) is int:
-      return reduce(set.union, map(partial(_dimsize, dim), aval, x), set())
-    elif dim is None:
-      return set()
-    else:
-      raise TypeError(type(dim))
+def broadcast(x, sz, axis):
+  shape = list(onp.shape(x))
+  shape.insert(axis, sz)
+  if isinstance(x, onp.ndarray) or onp.isscalar(x):
+    return onp.broadcast_to(x, shape)
   else:
-    if type(dim) is int:
-      return {x.shape[dim]}
-    elif dim is None:
-      return set()
-    else:
-      raise TypeError(type(dim))
+    broadcast_dims = tuple(onp.delete(onp.arange(len(shape)), axis))
+    return x.broadcast_in_dim(shape, broadcast_dims)
 
-def moveaxis(sz, dst, src, x, force_broadcast=True):
-  return _moveaxis(force_broadcast, sz, dst, src, get_aval(x), x)
+def moveaxis(x, src, dst):
+  src, dst = src % x.ndim, dst % x.ndim
+  perm = [i for i in range(onp.ndim(x)) if i != src]
+  perm.insert(dst, src)
+  return x.transpose(perm)
 
-def _moveaxis(force_bcast, sz, dst, src, aval, x):
-  if type(aval) is AbstractTuple:
-    if type(src) is tuple and type(dst) is tuple:
-      return pack(map(partial(_moveaxis, force_bcast, sz), dst, src, aval, x))
-    elif type(src) is tuple:
-      return pack(map(partial(_moveaxis, force_bcast, sz, dst), src, aval, x))
-    elif type(dst) is tuple:
-      srcs = (src,) * len(dst)
-      return pack(map(partial(_moveaxis, force_bcast, sz), dst, srcs, aval, x))
-    elif type(src) in (int, type(None)):
-      return pack(map(partial(_moveaxis, force_bcast, sz, dst, src), aval, x))
-    else:
-      raise TypeError(type(src))
-  elif isinstance(aval, ShapedArray):
-    dst_ = (dst % aval.ndim) if dst is not None and aval.ndim else dst
-    if src == dst_:
-      return x
-    else:
-      if src is None:
-        x = broadcast(x, sz, force_broadcast=force_bcast)
-        src = 0
-        dst_ = dst % (aval.ndim + 1)
-      elif src >= aval.ndim:
-        raise ValueError(
-          "cannot move axis {} in {}-dimensional array".format(src, aval.ndim))
-      if src == dst_:
-        return x
-      else:
-        perm = [i for i in range(onp.ndim(x)) if i != src]
-        perm.insert(dst_, src)
-        return x.transpose(perm)
-  else:
-    raise TypeError(type(aval))
-
-def broadcast(x, sz, force_broadcast=False):
-  return _broadcast(force_broadcast, sz, get_aval(x), x)
-
-def _broadcast(force_bcast, sz, aval, x):
-  if type(aval) is AbstractTuple:
-    return pack(map(partial(_broadcast, sz), aval, x))
-  elif isinstance(aval, ShapedArray):
-    # for scalars, maybe don't actually broadcast
-    if not onp.ndim(x) and not force_bcast:
-      return x
-
-    # see comment at the top of this section
-    if isinstance(x, onp.ndarray) or onp.isscalar(x):
-      return onp.broadcast_to(x, (sz,) + onp.shape(x))
-    else:
-      return x.broadcast((sz,))  # should be a JAX arraylike
-  else:
-    raise TypeError(type(x))
-
-def handle_scalar_broadcasting(nd, x, bdim):
-  assert isinstance(get_aval(x), ShapedArray)
-  if bdim is None or nd == onp.ndim(x):
+def matchaxis(sz, src, dst, x):
+  if src == dst:
     return x
+  elif type(src) == type(dst) == int:
+    return moveaxis(x, src, dst)
+  elif src is not_mapped and dst is not not_mapped:
+    return broadcast(x, sz, dst)
   else:
-    return x.reshape(x.shape + (1,) * (nd - x.ndim))
+    raise ValueError((src, dst))
+
+def bdim_at_front(x, bdim, size):
+  if bdim is not_mapped:
+    return broadcast(x, size, 0)
+  else:
+    return moveaxis(x, bdim, 0)
 
 
 # TODO(mattjj): try to de-duplicate utility functions with above
 
 def _bdim_map(f, bdim):
+  assert False, "update it"
   t = type(bdim)
   if t is tuple:
     return tuple(map(partial(_bdim_map, f), bdim))
-  elif t in (int, type(None)):
+  elif t in (int, type(not_mapped)):
     return f(bdim)
   else:
     raise TypeError(t)
-where_batched = partial(_bdim_map, lambda x: x is not None)
-increment_bdim = partial(_bdim_map, lambda x: None if x is None else x + 1)
+where_batched = partial(_bdim_map, lambda x: x is not not_mapped)
+increment_bdim = partial(_bdim_map, lambda x: not_mapped if x is not_mapped else x + 1)
 
 def bools_to_bdims(bdim, batched_indicator_tree):
+  assert False, "update it"
   t = type(batched_indicator_tree)
   if t is tuple:
     return tuple(map(partial(bools_to_bdims, bdim), batched_indicator_tree))
   elif t is bool:
-    return bdim if batched_indicator_tree else None
+    return bdim if batched_indicator_tree else not_mapped
   else:
     raise TypeError(t)
 
 def instantiate_bdim(size, axis, instantiate, bdim, x):
+  assert False, "update it"
   """Instantiate or move a batch dimension to position `axis`.
 
   Ensures that `x` is at least as high on the batched lattice as `instantiate`.
@@ -428,13 +317,13 @@ def instantiate_bdim(size, axis, instantiate, bdim, x):
     if type(instantiate) is tuple:
       if type(bdim) is tuple:
         return core.pack(map(_inst, instantiate, bdim, x))
-      elif type(bdim) is int or bdim is None:
+      elif type(bdim) is int or bdim is not_mapped:
         bdims = (bdim,) * len(instantiate)
         return core.pack(map(_inst, instantiate, bdims, x))
       else:
         raise TypeError(type(bdim))
     elif type(instantiate) is bool:
-      if bdim is None:
+      if bdim is not_mapped:
         return broadcast2(size, axis, x) if instantiate else x
       elif type(bdim) is int:
         return moveaxis2(bdim, axis, x)
@@ -448,12 +337,14 @@ def instantiate_bdim(size, axis, instantiate, bdim, x):
   return _inst(instantiate, bdim, x)
 
 def moveaxis2(src, dst, x):
+  assert False, "update it"
   if src == dst:
     return x
   else:
     return _moveaxis2(src, dst, x, get_aval(x))
 
 def _moveaxis2(src, dst, x, aval):
+  assert False, "update it"
   if type(aval) is AbstractTuple:
     return core.pack(map(partial(_moveaxis2, src, dst), x, aval))
   else:
@@ -462,9 +353,11 @@ def _moveaxis2(src, dst, x, aval):
     return x.transpose(perm)
 
 def broadcast2(size, axis, x):
+  assert False, "update it"
   return _broadcast2(size, axis, x, get_aval(x))
 
 def _broadcast2(size, axis, x, aval):
+  assert False, "update it"
   if type(aval) is AbstractTuple:
     return core.pack(map(partial(_broadcast2, size, axis), x, aval))
   else:
@@ -475,6 +368,7 @@ def _broadcast2(size, axis, x, aval):
       return x.broadcast((size,))  # should be a JAX arraylike
 
 def _promote_aval_rank(n, batched, aval):
+  assert False, "update it"
   assert isinstance(aval, core.AbstractValue)
   if type(aval) is AbstractTuple:
     t = type(batched)
@@ -494,6 +388,7 @@ def _promote_aval_rank(n, batched, aval):
       return aval
 
 def batch_jaxpr(jaxpr, size, is_batched, instantiate):
+  assert False, "update it"
   f = wrap_init(core.jaxpr_as_fun(jaxpr))
   f_batched, where_out_batched = batched_traceable(f, size, is_batched, instantiate)
   in_avals = tuple(map(partial(_promote_aval_rank, size), is_batched, jaxpr.in_avals))
@@ -506,6 +401,7 @@ def batch_jaxpr(jaxpr, size, is_batched, instantiate):
 
 @transformation_with_aux
 def batched_traceable(size, is_batched, instantiate, *vals):
+  assert False, "update it"
   in_dims = bools_to_bdims(0, is_batched)
   with new_master(BatchTrace) as master:
     trace = BatchTrace(master, core.cur_sublevel())
@@ -518,6 +414,7 @@ def batched_traceable(size, is_batched, instantiate, *vals):
   yield out_val, _binary_lattice_join(where_batched(out_dim), instantiate)
 
 def _binary_lattice_join(a, b):
+  assert False, "update it"
   t = (type(a), type(b))
   if t == (tuple, tuple):
     return tuple(map(_binary_lattice_join, a, b))

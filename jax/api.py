@@ -27,7 +27,7 @@ from __future__ import division
 from __future__ import print_function
 
 import collections
-import itertools
+import itertools as it
 import operator as op
 import os
 from warnings import warn
@@ -47,7 +47,8 @@ from .api_util import (wraps, flatten_fun, flatten_fun_nokwargs,
                        apply_flat_fun_nokwargs)
 from .tree_util import (process_pytree, node_types, build_tree, PyTreeDef,
                         tree_map, tree_flatten, tree_unflatten, tree_structure,
-                        tree_transpose, leaf, tree_leaves)
+                        tree_transpose, leaf, tree_leaves, tree_multimap,
+                        walk_pytree, _num_leaves)
 from .util import (unzip2, unzip3, curry, partial, safe_map, safe_zip,
                    WrapHashably, Hashable, prod)
 from .lib.xla_bridge import canonicalize_dtype, device_count
@@ -570,12 +571,10 @@ def vmap(fun, in_axes=0, out_axes=0):
 
   (here we use `[a,b]` to indicate an array with shape (a,b))
   """
-
   docstr = ("Vectorized version of {fun}. Takes similar arguments as {fun} "
             "but with additional array axes over which {fun} is mapped.")
 
   _check_callable(fun)
-
   if (not isinstance(in_axes, (list, tuple, type(None), int))
       or not isinstance(out_axes, (list, tuple, type(None), int))):
     msg = ("vmap arguments in_axes and out_axes must each be an integer, None, "
@@ -583,19 +582,22 @@ def vmap(fun, in_axes=0, out_axes=0):
     raise TypeError(msg.format(type(in_axes), type(out_axes)))
 
   @wraps(fun, docstr=docstr)
-  def batched_fun(*args, **kwargs):
-    if kwargs:
-      msg = ("kwargs not yet supported for functions output by vmap. Please "
-             "+1 the issue https://github.com/google/jax/issues/912")
-      raise NotImplementedError(msg)
-    f = lu.wrap_init(fun, kwargs) if not isinstance(fun, lu.WrappedFun) else fun
-    in_axes_ = in_axes if isinstance(in_axes, (list, tuple)) else (in_axes,) * len(args)
-    in_flat, in_trees = unzip2(map(pytree_to_jaxtupletree, args))
-    jaxtree_fun, out_tree = pytree_fun_to_jaxtupletree_fun(f, in_trees)
-    out_flat = batching.batch(jaxtree_fun, in_flat, in_axes_, out_axes)
-    return build_tree(out_tree(), out_flat)
+  def batched_fun(*args):
+    args_flat, in_tree  = tree_flatten(args)
+    f = lu.wrap_init(fun)
+    flat_fun, out_tree = flatten_fun_nokwargs(f, in_tree)
+    out_flat = batching.batch(flat_fun, args_flat, _flatten_axes(in_tree, in_axes),
+                              lambda: _flatten_axes(out_tree(), out_axes))
+    return tree_unflatten(out_tree(), out_flat)
 
   return batched_fun
+
+def _flatten_axes(treedef, axis_tree):
+  dummy = tree_unflatten(treedef, it.repeat(object()))
+  axes = []
+  add_leaves = lambda i, x: axes.extend([i] * len(tree_flatten(x)[0]))
+  tree_multimap(add_leaves, axis_tree, dummy)
+  return axes
 
 
 def pmap(fun, axis_name=None):
@@ -842,10 +844,10 @@ def jvp(fun, primals, tangents):
   if not isinstance(fun, lu.WrappedFun):
     fun = lu.wrap_init(fun)
 
-  ps_flat, tree_def = tree_flatten((primals, {}))
-  ts_flat, tree_def_2 = tree_flatten((tangents, {}))
+  ps_flat, tree_def = tree_flatten(primals)
+  ts_flat, tree_def_2 = tree_flatten(tangents)
   assert tree_def == tree_def_2, (tree_def, tree_def_2)
-  flat_fun, out_tree = flatten_fun(fun, tree_def)
+  flat_fun, out_tree = flatten_fun_nokwargs(fun, tree_def)
   out_primals, out_tangents = ad.jvp(flat_fun).call_wrapped(ps_flat, ts_flat)
   return (tree_unflatten(out_tree(), out_primals),
           tree_unflatten(out_tree(), out_tangents))
@@ -1075,7 +1077,7 @@ def _argnums_partial(f, dyn_argnums, args):
     dyn_argnums = (dyn_argnums,)
   else:
     dyn_argnums = tuple(dyn_argnums)
-  fixed_args = tuple([None if i in dyn_argnums else _wrap_hashably(arg)
+  fixed_args = tuple([core.unit if i in dyn_argnums else _wrap_hashably(arg)
                       for i, arg in enumerate(args)])
   dyn_args = tuple(args[i] for i in dyn_argnums)
   return _argnums_partial_(f, dyn_argnums, fixed_args), dyn_args
@@ -1090,7 +1092,7 @@ def _wrap_hashably(arg):
 
 @lu.transformation
 def _argnums_partial_(dyn_argnums, fixed_args, *dyn_args, **kwargs):
-  args = [None if arg is None else arg.val for arg in fixed_args]
+  args = [None if arg is core.unit else arg.val for arg in fixed_args]
   for i, arg in zip(dyn_argnums, dyn_args):
     args[i] = arg
   ans = yield args, kwargs
@@ -1601,7 +1603,7 @@ def _make_graphviz(fun):
     aval = xla.abstractify(x)
     return pe.PartialVal((aval, core.unit))
 
-  id_names = ("id{}".format(i) for i in itertools.count())
+  id_names = ("id{}".format(i) for i in it.count())
 
   def jaxpr_to_graphviz(jaxpr, consts):
     fragment = []

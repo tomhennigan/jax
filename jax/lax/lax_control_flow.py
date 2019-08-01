@@ -198,8 +198,8 @@ def _while_loop_translation_rule(c, axis_env, init_val, cond_consts,
       + list(body_jaxpr.eqns) +
       [_pack_eqn([body_jaxpr.outvar, cond_var, body_var], outvar)])
 
-  cond_c = xla._jaxpr_computation(cond_jaxpr_converted, axis_env, (), (), shape)
-  body_c = xla._jaxpr_computation(body_jaxpr_converted, axis_env, (), (), shape)
+  cond_c = xla.jaxpr_computation(cond_jaxpr_converted, axis_env, (), (), shape)
+  body_c = xla.jaxpr_computation(body_jaxpr_converted, axis_env, (), (), shape)
   full_ans = c.While(cond_c, body_c, loop_carry)
   return c.GetTupleElement(full_ans, 0)
 
@@ -381,8 +381,8 @@ def _cond_translation_rule(c, axis_env, pred, true_op, true_consts, false_op,
         [_unpack_eqn(arg_var, [jaxpr.invars[0], consts_var]),
         _unpack_eqn(consts_var, jaxpr.constvars)]
         + list(jaxpr.eqns))
-    return xla._jaxpr_computation(jaxpr_converted, axis_env, (), (),
-                                  c.GetShape(operand))
+    return xla.jaxpr_computation(jaxpr_converted, axis_env, (), (),
+                                 c.GetShape(operand))
 
   true_arg = c.Tuple(true_op, true_consts)
   true_comp = make_computation(true_jaxpr, true_arg)
@@ -715,10 +715,10 @@ def _put_known_pvs(is_unknown, aval):
 
 
 def _scan_transpose(ct, consts, init, xs, forward, length, jaxpr):
-  assert consts is None and init is None
+  assert consts is ad.undefined_primal and init is ad.undefined_primal
   assert type(xs) is tuple
   a, res = xs
-  assert a is None and res is not None
+  assert a is ad.undefined_primal and res is not ad.undefined_primal
 
   # jaxpr :: d -> c -> (a, res) ->  (c, b)
   # jaxpr_lifted :: res -> (d, c, a) -> (c, b)
@@ -815,7 +815,7 @@ def _transpose_jaxpr(jaxpr):
   @lu.wrap_init
   def transposed(res, b_bar):
     _, (_, a_bar) = ad.backward_pass(jaxpr.jaxpr, jaxpr.literals, (),
-                                     (res, None), b_bar)
+                                     (res, ad.undefined_primal), b_bar)
     a_bar = ad.instantiate_zeros_aval(jaxpr.in_avals[1], a_bar)
     return a_bar
 

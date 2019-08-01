@@ -150,8 +150,10 @@ class Primitive(object):
 
     tracers = map(top_trace.full_raise, args)
     out_tracer = top_trace.process_primitive(self, tracers, kwargs)
-    assert not self.multiple_results, "update it"
-    return full_lower(out_tracer)
+    if self.multiple_results:
+      return map(full_lower, out_tracer)
+    else:
+      return full_lower(out_tracer)
 
   def def_impl(self, impl):
     self.impl = impl

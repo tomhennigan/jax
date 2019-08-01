@@ -86,11 +86,7 @@ def tree_multimap(f, tree, *rest):
     all_children = [children]
     for other_tree in rest:
       other_node_type = _get_node_type(other_tree)
-      if node_type != other_node_type:
-        raise TypeError('Mismatch: {} != {}'.format(other_node_type, node_type))
-      other_children, other_aux_data = node_type.to_iterable(other_tree)
-      if other_aux_data != aux_data:
-        raise TypeError('Mismatch: {} != {}'.format(other_aux_data, aux_data))
+      other_children, _ = node_type.to_iterable(other_tree)
       all_children.append(other_children)
 
     new_children = [tree_multimap(f, *xs) for xs in zip(*all_children)]
@@ -254,7 +250,6 @@ def register_pytree_node(py_type, to_iterable, from_iterable):
 register_pytree_node(tuple, lambda xs: (xs, None), lambda _, xs: tuple(xs))
 register_pytree_node(list, lambda xs: (tuple(xs), None), lambda _, xs: list(xs))
 register_pytree_node(dict, dict_to_iterable, lambda keys, xs: dict(zip(keys, xs)))
-register_pytree_node(type(None), lambda z: ((), None), lambda _, xs: None)
 
 
 # To handle namedtuples, we can't just use the standard table of node_types

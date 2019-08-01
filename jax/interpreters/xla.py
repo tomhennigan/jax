@@ -124,7 +124,12 @@ def apply_primitive(prim, *args, **params):
 
 @memoize
 def xla_primitive_callable(prim, *abstract_args, **params):
-  handle_result = aval_to_result_handler(prim.abstract_eval(*abstract_args, **params))
+  aval_out = prim.abstract_eval(*abstract_args, **params)
+  if prim.multiple_results:
+    handlers = tuple(map(aval_to_result_handler, aval_out))
+    handle_result = lambda xs: tuple(h(x) for h, x in zip(handlers, xs.destructure()))
+  else:
+    handle_result = aval_to_result_handler(aval_out)
   xla_shapes = tuple(map(aval_to_xla_shape, abstract_args))
   built_c = primitive_computation(prim, *xla_shapes, **params)
   compiled = built_c.Compile(xla_shapes, xb.get_compile_options(),
@@ -205,6 +210,11 @@ def eqn_literals(eqn):
       yield v.val
 
 def jaxpr_computation(jaxpr, axis_env, const_vals, freevar_shapes, *arg_shapes):
+  c, out_nodes = _jaxpr_computation(jaxpr, axis_env, const_vals, freevar_shapes,
+                                    *arg_shapes)
+  return c.Build(c.Tuple(*out_nodes))
+
+def _jaxpr_computation(jaxpr, axis_env, const_vals, freevar_shapes, *arg_shapes):
   c = xb.make_computation_builder("jaxpr_computation")
   platform = xb.get_backend().platform
   _map(prefetch, it.chain(jaxpr_literals(jaxpr), const_vals))
@@ -255,7 +265,7 @@ def jaxpr_computation(jaxpr, axis_env, const_vals, freevar_shapes, *arg_shapes):
     c.GetShape(ans)  # force xla to do shape error checking
     out_nodes = xla_destructure(c, ans) if eqn.primitive.multiple_results else [ans]
     _map(write, eqn.outvars, out_nodes)
-  return c.Build(c.Tuple(*map(read, jaxpr.outvars)))
+  return c, tuple(map(read, jaxpr.outvars))
 
 def xla_destructure(c, ans):
   num_elements = len(c.GetShape(ans).tuple_shapes())

@@ -32,7 +32,7 @@ from ..util import partial, unzip2, concatenate, prod, memoize_unary
 from ..lib import xla_bridge as xb
 # from .xla import xla_shape, xla_destructure, xla_shape_to_result_shape
 from .partial_eval import trace_to_subjaxpr, merge_pvals, JaxprTrace, PartialVal
-from .batching import dimsize, broadcast
+# from .batching import dimsize, broadcast
 from . import batching
 from . import partial_eval as pe
 from . import xla
@@ -214,7 +214,7 @@ def compile_replicated(jaxpr, axis_name, axis_size, consts, *abstract_args):
     raise ValueError(msg.format(num_replicas, xb.device_count()))
   axis_env = xla.AxisEnv(num_replicas, [axis_name], [axis_size])
   arg_shapes = list(map(xla_shape, abstract_args))
-  built_c = xla._jaxpr_computation(jaxpr, axis_env, consts, (), *arg_shapes)
+  built_c = xla.jaxpr_computation(jaxpr, axis_env, consts, (), *arg_shapes)
   result_shape = xla_shape_to_result_shape(built_c.GetReturnValueShape())
   compiled = built_c.Compile(arg_shapes, xb.get_compile_options(num_replicas),
                              backend=xb.get_backend())
@@ -389,8 +389,6 @@ class ShardedDeviceArray(ShardedDeviceValue, xla.DeviceArray):
 core.pytype_aval_mappings[ShardedDeviceArray] = ConcreteArray
 xla.pytype_aval_mappings[ShardedDeviceArray] = \
     xla.pytype_aval_mappings[xla.DeviceArray]
-batching.pytype_aval_mappings[ShardedDeviceArray] = \
-    batching.pytype_aval_mappings[xla.DeviceArray]
 xla.canonicalize_dtype_handlers[ShardedDeviceArray] = \
     xla.canonicalize_dtype_handlers[xla.DeviceArray]
 
@@ -412,8 +410,6 @@ class ChunkedDeviceArray(ShardedDeviceArray):
 core.pytype_aval_mappings[ChunkedDeviceArray] = ConcreteArray
 xla.pytype_aval_mappings[ChunkedDeviceArray] = \
     xla.pytype_aval_mappings[xla.DeviceArray]
-batching.pytype_aval_mappings[ChunkedDeviceArray] = \
-    batching.pytype_aval_mappings[xla.DeviceArray]
 xla.canonicalize_dtype_handlers[ChunkedDeviceArray] = \
     xla.canonicalize_dtype_handlers[xla.DeviceArray]
 
@@ -507,9 +503,9 @@ def _xla_pmap_translation_rule(c, jaxpr, axis_env, env_nodes, in_nodes,
                                axis_name, axis_size):
   new_env = xla.extend_axis_env(axis_env, axis_name, axis_size)
   in_nodes_sharded = list(map(partial(xla_shard, c, new_env.sizes), in_nodes))
-  subc = xla._jaxpr_computation(jaxpr, new_env, (),
-                                tuple(map(c.GetShape, env_nodes)),
-                                *map(c.GetShape, in_nodes_sharded))
+  subc = xla.jaxpr_computation(jaxpr, new_env, (),
+                               tuple(map(c.GetShape, env_nodes)),
+                               *map(c.GetShape, in_nodes_sharded))
   sharded_result = c.Call(subc, env_nodes + in_nodes_sharded)
   return xla_unshard(c, xla.axis_groups(new_env, axis_name), sharded_result)
 xla.call_translations[xla_pmap_p] = _xla_pmap_translation_rule
