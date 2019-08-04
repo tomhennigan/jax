@@ -19,6 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import itertools
 import operator
 
 import numpy as onp
@@ -29,13 +30,14 @@ from jax.lax import lax
 from jax.lax import _abstractify
 from jax import linear_util as lu
 from jax.abstract_arrays import ConcreteArray, ShapedArray, UnshapedArray
-from jax.api_util import flatten_fun
+from jax.api_util import flatten_fun_nokwargs
 from jax.interpreters import batching
 from jax.interpreters import partial_eval as pe
 from jax.interpreters import xla
 from jax.interpreters import ad
+from jax.lib import xla_bridge as xb
 from jax.util import partial, unzip2, safe_map, safe_zip
-from jax.tree_util import build_tree, tree_unflatten, tree_map, tree_flatten
+from jax.tree_util import tree_flatten, tree_unflatten, PyTreeDef
 from jax import ad_util
 
 map = safe_map
@@ -121,18 +123,19 @@ def while_loop(cond_fun, body_fun, init_val):
   Returns:
     The output from the final iteration of body_fun, of type ``a``.
   """
-  init_val_flat, in_tree = pytree_to_jaxtupletree(init_val)
-  flat_body_fun, out_tree = pytree_fun_to_jaxtupletree_fun(lu.wrap_init(body_fun), (in_tree,))
-  flat_cond_fun, _ = pytree_fun_to_jaxtupletree_fun(lu.wrap_init(cond_fun), (in_tree,))
+  init_vals, in_tree = tree_flatten((init_val,))
+  flat_body_fun, out_tree = flatten_fun_nokwargs(lu.wrap_init(body_fun), in_tree)
+  flat_cond_fun, _ = flatten_fun_nokwargs(lu.wrap_init(cond_fun), in_tree)
 
-  carry_pval_flat = carry_aval, _ = _abstractify(init_val_flat)
-  cond_jaxpr, cond_pval_out, cond_consts = pe.trace_to_jaxpr(flat_cond_fun, (carry_pval_flat,))
-  body_jaxpr, body_pval_out, body_consts = pe.trace_to_jaxpr(flat_body_fun, (carry_pval_flat,), instantiate=True)
-  carry_aval_out, _ = body_pval_out
-  assert isinstance(carry_aval_out, core.AbstractValue)
-  assert carry_aval == core.lattice_join(carry_aval, carry_aval_out)
+  carry_pvals = map(_abstractify, init_vals)
+  carry_avals, _ = unzip2(carry_pvals)
+  cond_jaxpr, cond_pvals_out, cond_consts = pe.trace_to_jaxpr(flat_cond_fun, carry_pvals)
+  body_jaxpr, body_pvals_out, body_consts = pe.trace_to_jaxpr(flat_body_fun, carry_pvals, instantiate=True)
+  carry_avals_out, _ = unzip2(body_pvals_out)
+  assert all(a1 == core.lattice_join(a1, a2)
+             for a1, a2 in zip(carry_avals, carry_avals_out))
 
-  cond_pv, cond_const = cond_pval_out
+  (cond_pv, cond_const), = cond_pvals_out
   if cond_pv is None:
     # cond_fun evaluates to a constant, so don't need to generate a while_loop
     if cond_const:
@@ -140,68 +143,94 @@ def while_loop(cond_fun, body_fun, init_val):
     else:
       return init_val
   else:
-    assert isinstance(cond_pv, core.AbstractValue)
     if (not isinstance(cond_pv, ShapedArray) or cond_pv.shape
         or cond_pv.dtype != onp.bool_):
       msg = "while_loop cond_fun must return a scalar boolean, got {}."
       raise TypeError(msg.format(cond_pv))
 
-  if out_tree() != in_tree:
-    raise TypeError("body_fun input and output must have identical structure")
-  out_flat = while_p.bind(
-      init_val_flat, core.pack(cond_consts), core.pack(body_consts),
-      aval_out=carry_aval_out, cond_jaxpr=cond_jaxpr, body_jaxpr=body_jaxpr)
-  return build_tree(out_tree(), out_flat)
+  if out_tree() != in_tree.children[0]:
+    raise TypeError("body_fun input and output must have identical structure, "
+                    "got input {} and output {}.".format(in_tree, out_tree()))
+  outs = while_p.bind(
+      *itertools.chain(init_vals, cond_consts, body_consts),
+      avals_out=carry_avals_out, cond_jaxpr=cond_jaxpr, body_jaxpr=body_jaxpr)
+  return tree_unflatten(out_tree(), outs)
 
 
-def _while_loop_impl(init_val, cond_consts, body_consts, aval_out, cond_jaxpr,
-                     body_jaxpr):
+def _unpack_while_loop_args(args, kwargs):
+  avals_out = kwargs.pop("avals_out")
+  cond_jaxpr = kwargs.pop("cond_jaxpr")
+  body_jaxpr = kwargs.pop("body_jaxpr")
+  assert not kwargs
+
+  n_init = len(body_jaxpr.invars)
+  n_cond_consts = len(cond_jaxpr.constvars)
+  n_body_consts = len(body_jaxpr.constvars)
+  init_vals, args = args[:n_init], args[n_init:]
+  cond_consts, args = args[:n_cond_consts], args[n_cond_consts:]
+  body_consts, args = args[:n_body_consts], args[n_body_consts:]
+  assert not args
+
+  return avals_out, cond_jaxpr, body_jaxpr, init_vals, cond_consts, body_consts
+
+def _while_loop_impl(*args, **kwargs):
+  avals_out, cond_jaxpr, body_jaxpr, init_vals, cond_consts, body_consts = \
+      _unpack_while_loop_args(args, kwargs)
   cond_fun = partial(core.eval_jaxpr, cond_jaxpr, cond_consts, ())
   body_fun = partial(core.eval_jaxpr, body_jaxpr, body_consts, ())
 
-  val = init_val
-  while cond_fun(val):
-    val = body_fun(val)
-  return val
+  vals = init_vals
+  while cond_fun(*vals)[0]:
+    vals = body_fun(*vals)
+  return vals
 
-def _while_loop_abstract_eval(init_val, cond_consts, body_consts, aval_out,
-                              cond_jaxpr, body_jaxpr):
-  return _maybe_tracer_tuple_to_abstract_tuple(aval_out)
+def _while_loop_abstract_eval(*args, **kwargs):
+  return kwargs["avals_out"]
 
-def _while_loop_translation_rule(c, axis_env, init_val, cond_consts,
-                                 body_consts, aval_out, cond_jaxpr, body_jaxpr):
-  loop_carry = c.Tuple(init_val, cond_consts, body_consts)
-  shape = c.GetShape(loop_carry)
+def _while_loop_translation_rule(c, axis_env, *args, **kwargs):
+  avals_out, cond_jaxpr, body_jaxpr, init_vals, cond_consts, body_consts = \
+      _unpack_while_loop_args(args, kwargs)
+  loop_carry = c.Tuple(*(init_vals + cond_consts + body_consts))
+  carry_shape = c.GetShape(loop_carry)
 
-  loop_carry_var = pe.Var(0, "loop_carry")
-  outvar = pe.Var(0, "loop_carry_out")
-  cond_var = pe.Var(0, "cond_consts")
-  body_var = pe.Var(0, "body_consts")
+  # Since jaxprs don't have tuples and have multiple return values, but we need
+  # the HLO While loop to take a single tuple input and output a single boolean
+  # (for the cond computation) or a single tuple output, we build XLA
+  # computations that handle the tuple munging before generating a Call into the
+  # computations formed from the jaxprs. We also handle the closure conversion.
 
-  assert len(cond_jaxpr.invars) == 1
   cond_jaxpr_converted = cond_jaxpr.copy()
   cond_jaxpr_converted.constvars = []
-  cond_jaxpr_converted.invars = [loop_carry_var]
-  cond_jaxpr_converted.eqns = (
-      [_unpack_eqn(loop_carry_var, [cond_jaxpr.invars[0], cond_var, body_var]),
-       _unpack_eqn(cond_var, cond_jaxpr.constvars)]
-      + list(cond_jaxpr.eqns))
+  cond_jaxpr_converted.invars = cond_jaxpr.invars + cond_jaxpr.constvars
+  cond_c = xb.make_computation_builder("cond_computation")
+  cond_carry = cond_c.ParameterWithShape(carry_shape)
+  cond_call_args = [cond_c.GetTupleElement(cond_carry, i)
+                    for i in range(len(init_vals) + len(cond_consts))]
+  cond_outs = cond_c.Call(
+      xla.jaxpr_computation(cond_jaxpr_converted, axis_env, (), (),
+                            *map(cond_c.GetShape, cond_call_args)),
+      cond_call_args)
+  cond_c = cond_c.Build(cond_c.GetTupleElement(cond_outs, 0))
 
-  assert len(body_jaxpr.invars) == 1
   body_jaxpr_converted = body_jaxpr.copy()
   body_jaxpr_converted.constvars = []
-  body_jaxpr_converted.invars = [loop_carry_var]
-  body_jaxpr_converted.outvar = outvar
-  body_jaxpr_converted.eqns = (
-      [_unpack_eqn(loop_carry_var, [body_jaxpr.invars[0], cond_var, body_var]),
-       _unpack_eqn(body_var, body_jaxpr.constvars)]
-      + list(body_jaxpr.eqns) +
-      [_pack_eqn([body_jaxpr.outvar, cond_var, body_var], outvar)])
+  body_jaxpr_converted.invars = body_jaxpr.invars + body_jaxpr.constvars
+  body_c = xb.make_computation_builder("body_computation")
+  body_carry = body_c.ParameterWithShape(carry_shape)
+  body_call_args = ([body_c.GetTupleElement(body_carry, i)
+                     for i in range(len(init_vals))] +
+                    [body_c.GetTupleElement(body_carry, i)
+                     for i in range(len(init_vals) + len(cond_consts), len(args))])
+  body_outs = body_c.Call(
+      xla.jaxpr_computation(body_jaxpr_converted, axis_env, (), (),
+                            *map(body_c.GetShape, body_call_args)),
+      body_call_args)
+  body_c = body_c.Build(body_c.Tuple(*itertools.chain(
+      [body_c.GetTupleElement(body_outs, i) for i in range(len(init_vals))],
+      [body_c.GetTupleElement(body_carry, i) for i in range(len(init_vals), len(args))])))
 
-  cond_c = xla.jaxpr_computation(cond_jaxpr_converted, axis_env, (), (), shape)
-  body_c = xla.jaxpr_computation(body_jaxpr_converted, axis_env, (), (), shape)
-  full_ans = c.While(cond_c, body_c, loop_carry)
-  return c.GetTupleElement(full_ans, 0)
+  ans = c.While(cond_c, body_c, loop_carry)
+  return c.Tuple(*[c.GetTupleElement(ans, i) for i in range(len(init_vals))])
 
 def _while_loop_batching_rule(batched_args, batch_dims,
                               aval_out, cond_jaxpr, body_jaxpr):
@@ -259,6 +288,7 @@ def _jaxtupletree_select(pred, on_true, on_false):
 
 
 while_p = lax.Primitive('while')
+while_p.multiple_results = True
 while_p.def_impl(_while_loop_impl)
 while_p.def_abstract_eval(_while_loop_abstract_eval)
 xla.initial_style_translations[while_p] = _while_loop_translation_rule
@@ -568,7 +598,7 @@ def scan(f, init, xs):
   length = _leading_dim_size(xs)
   out = scan_p.bind(core.pack(consts), init, xs,
                     forward=True, length=length, jaxpr=jaxpr)
-  return build_tree(out_tree(), out)
+  return tree_unflatten(out_tree(), out)
 
 
 def _scan_impl(consts, init, xs, forward, length, jaxpr):

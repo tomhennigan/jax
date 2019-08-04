@@ -265,7 +265,7 @@ def _jaxpr_computation(jaxpr, axis_env, const_vals, freevar_shapes, *arg_shapes)
     c.GetShape(ans)  # force xla to do shape error checking
     out_nodes = xla_destructure(c, ans) if eqn.primitive.multiple_results else [ans]
     _map(write, eqn.outvars, out_nodes)
-  return c, tuple(map(read, jaxpr.outvars))
+  return c, _map(read, jaxpr.outvars)
 
 def xla_destructure(c, ans):
   num_elements = len(c.GetShape(ans).tuple_shapes())

@@ -41,11 +41,11 @@ map = safe_map
 
 class Jaxpr(object):
   def __init__(self, constvars, freevars, invars, outvars, eqns):
-    self.constvars = constvars
-    self.freevars = freevars
-    self.invars = invars
-    self.outvars = outvars
-    self.eqns = eqns
+    self.constvars = tuple(constvars)
+    self.freevars = tuple(freevars)
+    self.invars = tuple(invars)
+    self.outvars = tuple(outvars)
+    self.eqns = tuple(eqns)
 
   def __str__(self):
     return str(pp_jaxpr(self))

@@ -84,9 +84,8 @@ class JaxprTrace(Trace):
       raise TypeError(pv)
 
   def process_primitive(self, primitive, tracers, params):
-    assert not primitive.multiple_results, "update it"
     if primitive in custom_partial_eval_rules:
-      assert False, "update to match new partial_eval"
+      assert False, "update it"
       partial_eval = custom_partial_eval_rules[primitive]
       return partial_eval(self, *tracers, **params)
     else:
@@ -96,10 +95,18 @@ class JaxprTrace(Trace):
       tracers = map(self.instantiate_const, tracers)
       avals = [t.aval for t in tracers]
       out_aval = primitive.abstract_eval(*avals, **params)
-      out_tracer = JaxprTracer(self, PartialVal((out_aval, unit)), None)
       # TODO(dougalm): think about whether these ref cycles will leak memory
-      out_tracer.recipe = new_jaxpr_eqn(tracers, [out_tracer], primitive, (), params)
-      return out_tracer
+      if primitive.multiple_results:
+        out_tracers = [JaxprTracer(self, PartialVal((aval, unit)), None)
+                       for aval in out_aval]
+        eqn = new_jaxpr_eqn(tracers, out_tracers, primitive, (), params)
+        for t in out_tracers:
+          t.recipe = eqn
+        return out_tracers
+      else:
+        out_tracer = JaxprTracer(self, PartialVal((out_aval, unit)), None)
+        out_tracer.recipe = new_jaxpr_eqn(tracers, [out_tracer], primitive, (), params)
+        return out_tracer
 
   def process_call(self, call_primitive, f, tracers, params):
     if call_primitive in map_primitives:
