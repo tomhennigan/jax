@@ -148,6 +148,7 @@ def while_loop(cond_fun, body_fun, init_val):
   cond_const_avals, _ = unzip2(map(_abstractify, cond_consts))
   cond_jaxpr = core.TypedJaxpr(pe._closure_convert_jaxpr(cond_jaxpr),
                                (), carry_avals + cond_const_avals, cond_out_avals)
+  cond_nconsts = len(cond_consts)
 
   body_fun, out_tree = flatten_fun_nokwargs(lu.wrap_init(body_fun), in_tree)
   body_jaxpr, body_pvals_out, body_consts = pe.trace_to_jaxpr(
@@ -163,30 +164,28 @@ def while_loop(cond_fun, body_fun, init_val):
   body_const_avals, _ = unzip2(map(_abstractify, body_consts))
   body_jaxpr = core.TypedJaxpr(pe._closure_convert_jaxpr(body_jaxpr),
                                (), carry_avals + body_const_avals, carry_avals_out)
+  body_nconsts = len(body_consts)
 
   outs = while_p.bind(
-      *itertools.chain(init_vals, cond_consts, body_consts),
-      cond_jaxpr=cond_jaxpr, body_jaxpr=body_jaxpr)
+      *itertools.chain(cond_consts, body_consts, init_vals),
+      cond_nconsts=cond_nconsts, cond_jaxpr=cond_jaxpr,
+      body_nconsts=body_nconsts, body_jaxpr=body_jaxpr)
   return tree_unflatten(out_tree(), outs)
 
-
-def _unpack_while_loop_args(args, cond_jaxpr, body_jaxpr):
-  n_init = len(body_jaxpr.invars)
-  n_cond_consts = len(cond_jaxpr.constvars)
-  n_body_consts = len(body_jaxpr.constvars)
-  init_vals, args = args[:n_init], args[n_init:]
-  cond_consts, args = args[:n_cond_consts], args[n_cond_consts:]
-  body_consts, args = args[:n_body_consts], args[n_body_consts:]
-  assert not args
-  return init_vals, cond_consts, body_consts
+def _split_list(args, ns):
+  lists = []
+  for n in ns:
+    lists.append(args[:n])
+    args = args[n:]
+  lists.append(args)
+  return lists
 
 def _while_loop_impl(*args, **kwargs):
   # TODO(mattjj): replace this with a call to apply_primitive
-  cond_jaxpr = kwargs.pop("cond_jaxpr")
-  body_jaxpr = kwargs.pop("body_jaxpr")
+  cond_jaxpr, cond_nconsts = kwargs.pop("cond_jaxpr"), kwargs.pop("cond_nconsts")
+  body_jaxpr, body_nconsts = kwargs.pop("body_jaxpr"), kwargs.pop("body_nconsts")
   assert not kwargs
-  init_vals, cond_consts, body_consts = \
-      _unpack_while_loop_args(args, cond_jaxpr.jaxpr, body_jaxpr.jaxpr)
+  cond_consts, body_consts, init_vals = _split_list(args, [cond_nconsts, body_nconsts])
 
   cond_fun = partial(core.eval_jaxpr, cond_jaxpr.jaxpr, (), ())
   body_fun = partial(core.eval_jaxpr, body_jaxpr.jaxpr, (), ())
@@ -197,15 +196,13 @@ def _while_loop_impl(*args, **kwargs):
   return vals
 
 def _while_loop_abstract_eval(*args, **kwargs):
-  return kwargs["body_jaxpr"].avals_out
+  return kwargs["body_jaxpr"].out_avals
 
 def _while_loop_translation_rule(c, axis_env, *args, **kwargs):
-  avals_out = kwargs.pop("avals_out")
-  cond_jaxpr = kwargs.pop("cond_jaxpr")
-  body_jaxpr = kwargs.pop("body_jaxpr")
+  cond_jaxpr, cond_nconsts = kwargs.pop("cond_jaxpr"), kwargs.pop("cond_nconsts")
+  body_jaxpr, body_nconsts = kwargs.pop("body_jaxpr"), kwargs.pop("body_nconsts")
   assert not kwargs
-  init_vals, cond_consts, body_consts = \
-      _unpack_while_loop_args(args, cond_jaxpr, body_jaxpr)
+  cond_consts, body_consts, init_vals = _split_list(args, [cond_nconsts, body_nconsts])
 
   # Since jaxprs don't have tuples and have multiple return values, but we need
   # the HLO While loop to take a single tuple input and output a single boolean
@@ -213,41 +210,32 @@ def _while_loop_translation_rule(c, axis_env, *args, **kwargs):
   # computation), we build XLA computations that handle the tuple munging before
   # generating a Call into the computations formed from the jaxprs.
 
-  loop_carry = c.Tuple(*(init_vals + cond_consts + body_consts))
+  loop_carry = c.Tuple(*(cond_consts + body_consts + init_vals))
   carry_shape = c.GetShape(loop_carry)
 
-  cond_jaxpr_converted = cond_jaxpr.copy()
-  cond_jaxpr_converted.constvars = []
-  cond_jaxpr_converted.invars = cond_jaxpr.invars + cond_jaxpr.constvars
   cond_c = xb.make_computation_builder("cond_computation")
   cond_carry = cond_c.ParameterWithShape(carry_shape)
-  cond_call_args = [cond_c.GetTupleElement(cond_carry, i)
-                    for i in range(len(init_vals) + len(cond_consts))]
+  cond_carry_elts = [cond_c.GetTupleElement(cond_carry, i) for i in range(len(args))]
+  x, _, z = _split_list(cond_carry_elts, [cond_nconsts, body_nconsts])
   cond_outs = cond_c.Call(
-      xla.jaxpr_computation(cond_jaxpr_converted, axis_env, (), (),
-                            *map(cond_c.GetShape, cond_call_args)),
-      cond_call_args)
+      xla.jaxpr_computation(cond_jaxpr.jaxpr, axis_env, (), (),
+                            *map(cond_c.GetShape, x + z)), x + z)
   cond_c = cond_c.Build(cond_c.GetTupleElement(cond_outs, 0))
 
-  body_jaxpr_converted = body_jaxpr.copy()
-  body_jaxpr_converted.constvars = []
-  body_jaxpr_converted.invars = body_jaxpr.invars + body_jaxpr.constvars
   body_c = xb.make_computation_builder("body_computation")
   body_carry = body_c.ParameterWithShape(carry_shape)
-  body_call_args = ([body_c.GetTupleElement(body_carry, i)
-                     for i in range(len(init_vals))] +
-                    [body_c.GetTupleElement(body_carry, i)
-                     for i in range(len(init_vals) + len(cond_consts), len(args))])
-  body_outs = body_c.Call(
-      xla.jaxpr_computation(body_jaxpr_converted, axis_env, (), (),
-                            *map(body_c.GetShape, body_call_args)),
-      body_call_args)
-  body_c = body_c.Build(body_c.Tuple(*itertools.chain(
-      [body_c.GetTupleElement(body_outs, i) for i in range(len(init_vals))],
-      [body_c.GetTupleElement(body_carry, i) for i in range(len(init_vals), len(args))])))
+  body_carry_elts = [body_c.GetTupleElement(body_carry, i) for i in range(len(args))]
+  x, y, z = _split_list(cond_carry_elts, [cond_nconsts, body_nconsts])
+  body_out = body_c.Call(
+      xla.jaxpr_computation(body_jaxpr.jaxpr, axis_env, (), (),
+                            *map(body_c.GetShape, y + z)), y + z)
+  z = [body_c.GetTupleElement(body_out, i) for i in range(len(init_vals))]
+  body_c = body_c.Build(body_c.Tuple(*(x + y + z)))
 
   ans = c.While(cond_c, body_c, loop_carry)
-  return c.Tuple(*[c.GetTupleElement(ans, i) for i in range(len(init_vals))])
+  ans_elts = [c.GetTupleElement(ans, i) for i in range(len(args))]
+  _,  _, z = _split_list(ans_elts, [cond_nconsts, body_nconsts])
+  return c.Tuple(*z)
 
 def _while_loop_batching_rule(args, dims, avals_out, cond_jaxpr, body_jaxpr):
   # See https://github.com/google/jax/issues/441 for a discussion.
