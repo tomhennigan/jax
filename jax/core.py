@@ -79,23 +79,15 @@ class TypedJaxpr(object):
   def __repr__(self):
     return self.__str__()
 
+  def copy(self):
+    return TypedJaxpr(self.jaxpr.copy(), self.literals[:], self.in_avals[:],
+                      self.out_avals[:])
+
 
 @curry
 def jaxpr_as_fun(typed_jaxpr, *args):
   invars = typed_jaxpr.jaxpr.invars
-  if not skip_checks:
-    for arg, in_aval, varname in zip(args, typed_jaxpr.in_avals, invars):
-      arg_aval = get_aval(arg)
-      if lattice_join(arg_aval, in_aval) != in_aval:
-        msg = "input type mismatch for arg {}: arg {} for parameter {}."
-        raise TypeError(msg.format(varname, arg_aval, in_aval))
-  out = eval_jaxpr(typed_jaxpr.jaxpr, typed_jaxpr.literals, (), *args)
-  if not skip_checks:
-    out_aval = get_aval(out)
-    if lattice_join(out_aval, typed_jaxpr.out_aval) != typed_jaxpr.out_aval:
-      msg = "output type mismatch: output value {} for output type {}."
-      raise TypeError(msg.format(out_aval, typed_jaxpr.out_aval))
-  return out
+  return eval_jaxpr(typed_jaxpr.jaxpr, typed_jaxpr.literals, (), *args)
 
 
 def new_jaxpr_eqn(*args):
@@ -206,7 +198,7 @@ def eval_jaxpr(jaxpr, consts, freevar_vals, *args):
       map(write, eqn.outvars, ans)
     else:
       write(eqn.outvars[0], ans)
-  return tuple(map(read, jaxpr.outvars))
+  return map(read, jaxpr.outvars)
 
 
 def pat_fmap(f, v, *xs):

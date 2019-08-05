@@ -32,14 +32,12 @@ def safe_zip(*args):
     assert len(arg) == n, 'length mismatch: {}'.format(list(map(len, args)))
   return list(zip(*args))
 
-
 def safe_map(f, *args):
   args = list(map(list, args))
   n = len(args[0])
   for arg in args[1:]:
     assert len(arg) == n, 'length mismatch: {}'.format(list(map(len, args)))
   return list(map(f, *args))
-
 
 def unzip2(xys):
   xs = []
@@ -48,7 +46,6 @@ def unzip2(xys):
     xs.append(x)
     ys.append(y)
   return tuple(xs), tuple(ys)
-
 
 def unzip3(xyzs):
   xs = []
@@ -60,10 +57,17 @@ def unzip3(xyzs):
     zs.append(z)
   return tuple(xs), tuple(ys), tuple(zs)
 
+def split_list(args, ns):
+  args = list(args)
+  lists = []
+  for n in ns:
+    lists.append(args[:n])
+    args = args[n:]
+  lists.append(args)
+  return lists
 
 def concatenate(xs):
   return list(it.chain.from_iterable(xs))
-
 
 def partial(fun, *args, **kwargs):
   wrapped = functools.partial(fun, *args, **kwargs)

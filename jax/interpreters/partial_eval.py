@@ -85,9 +85,7 @@ class JaxprTrace(Trace):
 
   def process_primitive(self, primitive, tracers, params):
     if primitive in custom_partial_eval_rules:
-      assert False, "update it"
-      partial_eval = custom_partial_eval_rules[primitive]
-      return partial_eval(self, *tracers, **params)
+      return custom_partial_eval_rules[primitive](self, *tracers, **params)
     else:
       pvs, consts = unzip2(t.pval for t in tracers)
       if all(pv is None for pv in pvs):

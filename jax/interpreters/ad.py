@@ -24,7 +24,7 @@ from ..core import Trace, Tracer, new_master, get_aval, call_p, Primitive, Liter
 from ..ad_util import (add_jaxvals, add_jaxvals_p, zeros_like_jaxval, zeros_like_aval,
                        zeros_like_p, zero, Zero)
 from ..abstract_arrays import raise_to_shaped
-from ..util import unzip2, unzip3, safe_map, safe_zip, partial
+from ..util import unzip2, unzip3, safe_map, safe_zip, partial, split_list
 from ..tree_util import process_pytree, build_tree, register_pytree_node, tree_map
 from ..linear_util import thunk, staged, transformation, transformation_with_aux, wrap_init
 from ..api_util import flatten_fun, flatten_fun_nokwargs  # TODO: can we avoid this?
@@ -49,8 +49,12 @@ def jvpfun(instantiate, primals, tangents):
   with new_master(JVPTrace) as master:
     out_primals, out_tangents = yield (master, primals, tangents), {}
     del master
-  out_tangents = map(partial(instantiate_zeros_at, instantiate),
-                     out_primals, out_tangents)
+  if type(instantiate) is bool:
+    if instantiate:
+      out_tangents = map(instantiate_zeros, out_primals, out_tangents)
+  else:
+    out_tangents = [instantiate_zeros(x, t) if inst else t for x, t, inst
+                    in zip(out_primals, out_tangents, instantiate)]
   yield (out_primals, out_tangents)
 
 
@@ -208,9 +212,7 @@ class JVPTrace(Trace):
     return JVPTracer(self, val.primal, val.tangent)
 
   def process_primitive(self, primitive, tracers, params):
-    assert not primitive.multiple_results, "update it"
-    primals_in = [t.primal for t in tracers]
-    tangents_in = [t.tangent for t in tracers]
+    primals_in, tangents_in = unzip2((t.primal, t.tangent) for t in tracers)
     try:
       jvp = primitive_jvps[primitive]
     except KeyError:
@@ -218,7 +220,10 @@ class JVPTrace(Trace):
           "Forward-mode differentiation rule for '{}' not implemented"
           .format(primitive))
     primal_out, tangent_out = jvp(primals_in, tangents_in, **params)
-    return JVPTracer(self, primal_out, tangent_out)
+    if primitive.multiple_results:
+      return [JVPTracer(self, x, t) for x, t in zip(primal_out, tangent_out)]
+    else:
+      return JVPTracer(self, primal_out, tangent_out)
 
   def process_call(self, call_primitive, f, tracers, params):
     assert call_primitive.multiple_results
@@ -426,11 +431,6 @@ deflinear(zeros_like_p, lambda t: [zero])
 deflinear(core.identity_p, lambda t: (t,))
 deflinear(add_jaxvals_p, lambda t: (t, t))
 
-
-def instantiate_zeros_at(instantiate, example, tangent):
-  assert type(instantiate) is bool
-  return instantiate_zeros(example, tangent) if instantiate else tangent
-
 def instantiate_zeros(example, tangent):
   if tangent is zero:
     return zeros_like_jaxval(example)
@@ -444,9 +444,9 @@ def instantiate_zeros_aval(aval, tangent):
     return tangent
 
 @transformation_with_aux
-def traceable(num_primals, in_tree_def, *new_primals_and_tangents):
-  new_primals  = new_primals_and_tangents[:num_primals]
-  new_tangents = new_primals_and_tangents[num_primals:]
+def traceable(num_primals, in_tree_def, *primals_and_tangents):
+  new_primals  = primals_and_tangents[:num_primals]
+  new_tangents = primals_and_tangents[num_primals:]
   new_tangents = tree_unflatten(in_tree_def, new_tangents)
   primal_out, tangent_out = yield (new_primals, new_tangents), {}
   out_flat, tree_def = tree_flatten((primal_out, tangent_out))
@@ -500,37 +500,43 @@ def strip_zeros(unit, pack, isnonzero, x):
   else:
     return pack(map(partial(strip_zeros, unit, pack), isnonzero, x))
 
-@transformation_with_aux
-def f_jvp_traceable(nonzero_components, *primal_tangent_pairs):
-  assert False, "update it"
-  primals, tangents = unzip2(primal_tangent_pairs)
-  tangents_zeros = map(partial(put_zeros, TangentTuple), nonzero_components, tangents)
-  primal_out, tangent_out = yield (primals, tangents_zeros), {}
-  # TODO check output is tuple
-  nonzeros_out = get_nonzeros(tangent_out)
-  tangent_out_nonzero = strip_zeros(core.unit, pack, nonzeros_out, tangent_out)
-  primal_tangent_pairs_out = [pack((p, t)) for p, t in zip(primal_out, tangent_out_nonzero)]
-  yield pack(primal_tangent_pairs_out), nonzeros_out
-
 def jvp_jaxpr(jaxpr, nonzeros, instantiate):
-  assert False, "update it"
-  # jaxpr :: d -> a -> b -> (c1, c2)
-  # avals = (d, a, b)
-  # f :: d -> a -> b -> (c1, c2)
   f = wrap_init(core.jaxpr_as_fun(jaxpr))
-  f_jvp, out_nonzeros = f_jvp_traceable(jvp(f, instantiate=instantiate), nonzeros)
-  # f_jvp :: (d, d') -> (a, a') -> (b, b') -> ((c1, c1'), (c2, c2'))
-  tangent_avals = map(partial(strip_zeros, core.AbstractTuple(()), core.AbstractTuple),
-                      nonzeros, jaxpr.in_avals)
-  pt_pvals = [pe.PartialVal((core.AbstractTuple((p_aval, t_aval)), core.unit))
-              for p_aval, t_aval in zip(jaxpr.in_avals, tangent_avals)]
-  jaxpr_out, pval_out, literals_out = pe.trace_to_jaxpr(
-      f_jvp, pt_pvals, instantiate=True)
-  # jaxpr_out :: (d, d') -> (a, a') -> (b, b') -> ((c1, c1'), (c2, c2'))
-  # out_nonzeros :: (nonzeros(c1), nonzeros(c2))
-  in_avals = tuple(map(core.AbstractTuple, zip(jaxpr.in_avals, tangent_avals)))
-  out_aval, _ = pval_out
-  jaxpr_out = core.TypedJaxpr(jaxpr_out, literals_out, in_avals, out_aval)
+  f_jvp, out_nonzeros = f_jvp_traceable(jvp(f, instantiate=instantiate),
+                                        nonzeros, len(nonzeros))
+  tangent_avals = [aval for aval, nz in zip(jaxpr.in_avals, nonzeros) if nz]
+  avals_in = list(it.chain(jaxpr.in_avals, tangent_avals))
+  pvals = [pe.PartialVal((aval, core.unit)) for aval in avals_in]
+  jaxpr_out, pvals_out, literals_out = pe.trace_to_jaxpr(f_jvp, pvals, instantiate=True)
+  avals_out, _ = unzip2(pvals_out)
+  jaxpr_out = core.TypedJaxpr(jaxpr_out, literals_out, avals_in, avals_out)
   return jaxpr_out, out_nonzeros()
 
+@transformation_with_aux
+def f_jvp_traceable(nonzeros, num_primals, *primals_and_tangents):
+  primals = list(primals_and_tangents[:num_primals])
+  nonzero_tangents = iter(primals_and_tangents[num_primals:])
+  tangents = [next(nonzero_tangents) if nz else zero for nz in nonzeros]
+  primals_out, tangents_out = yield (primals, tangents), {}
+  out_nonzeros = [t is not zero for t in tangents_out]
+  nonzero_tangents_out = [t for t in tangents if t is not zero]
+  yield list(primals_out) + tangents_out, out_nonzeros
 
+def rearrange_binders(jaxpr, primals_in, tangents_in, primals_out, tangents_out):
+  jaxpr = jaxpr.copy()
+  jaxpr.jaxpr.invars = _perm(primals_in, tangents_in, jaxpr.jaxpr.invars)
+  jaxpr.in_avals = _perm(primals_in, tangents_in, jaxpr.in_avals)
+  jaxpr.jaxpr.outvars = _perm(primals_out, tangents_out, jaxpr.jaxpr.outvars)
+  jaxpr.out_avals = _perm(primals_out, tangents_out, jaxpr.out_avals)
+  return jaxpr
+
+def _perm(primal_counts, tangent_counts, lst):
+  n = sum(primal_counts)
+  primals, tangents = lst[:n], lst[n:]
+  primal_groups = split_list(primals, primal_counts[:-1])
+  tangent_groups = split_list(tangents, tangent_counts[:-1])
+  return _interleave(primal_groups, tangent_groups)
+
+def _interleave(xs, ys):
+  assert len(xs) == len(ys)
+  return [e for pair in zip(xs, ys) for l in pair for e in l]
