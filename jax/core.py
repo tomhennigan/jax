@@ -58,22 +58,22 @@ class Jaxpr(object):
                  self.outvars, self.eqns[:])
 
 class TypedJaxpr(object):
-  def __init__(self, jaxpr, literals, in_avals, out_aval):
+  def __init__(self, jaxpr, literals, in_avals, out_avals):
     assert type(jaxpr) is Jaxpr
     assert len(literals) == len(jaxpr.constvars)
     assert len(in_avals) == len(jaxpr.invars)
     assert not jaxpr.freevars
 
     self.jaxpr = jaxpr
-    self.literals = literals
-    self.in_avals = in_avals
-    self.out_aval = out_aval
+    self.literals = tuple(literals)
+    self.in_avals = tuple(in_avals)
+    self.out_avals = tuple(out_avals)
 
   def __iter__(self):
-    return iter((self.jaxpr, self.literals, self.in_avals, self.out_aval))
+    return iter((self.jaxpr, self.literals, self.in_avals, self.out_avals))
 
   def __str__(self):
-    # TODO(mattjj): improve this with type annotations?
+    # TODO improve this with type annotations?
     return str(pp_jaxpr(self.jaxpr))
 
   def __repr__(self):

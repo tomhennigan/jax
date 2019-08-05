@@ -487,7 +487,7 @@ def _closure_convert_jaxpr(jaxpr):
   core.skip_checks or core.check_jaxpr(jaxpr)
   lifted_jaxpr = jaxpr.copy()
   lifted_jaxpr.constvars = ()
-  lifted_jaxpr.invars = [tuple(jaxpr.constvars)] + list(jaxpr.invars)
+  lifted_jaxpr.invars = jaxpr.constvars + jaxpr.invars
   core.skip_checks or core.check_jaxpr(lifted_jaxpr)
   return lifted_jaxpr
 
