@@ -195,6 +195,8 @@ ad_util.aval_zeros_likers[ShapedArray] = zeros_like_shaped_array
 def raise_to_shaped(aval):
   if isinstance(aval, ShapedArray):
     return ShapedArray(aval.shape, aval.dtype)
+  elif aval is core.abstract_unit:
+    return core.abstract_unit
   else:
     raise TypeError(type(aval))
 

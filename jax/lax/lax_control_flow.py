@@ -146,7 +146,7 @@ def while_loop(cond_fun, body_fun, init_val):
       raise TypeError(msg.format(cond_out_pv))
     cond_out_avals = (cond_out_pv,)
   cond_const_avals, _ = unzip2(map(_abstractify, cond_consts))
-  cond_jaxpr = core.TypedJaxpr(pe._closure_convert_jaxpr(cond_jaxpr),
+  cond_jaxpr = core.TypedJaxpr(pe.closure_convert_jaxpr(cond_jaxpr),
                                (), carry_avals + cond_const_avals, cond_out_avals)
   cond_nconsts = len(cond_consts)
 
@@ -162,7 +162,7 @@ def while_loop(cond_fun, body_fun, init_val):
            "input is {} and output is {}.")
     raise TypeError(msg.format(carry_avals, carry_avals_out))
   body_const_avals, _ = unzip2(map(_abstractify, body_consts))
-  body_jaxpr = core.TypedJaxpr(pe._closure_convert_jaxpr(body_jaxpr),
+  body_jaxpr = core.TypedJaxpr(pe.closure_convert_jaxpr(body_jaxpr),
                                (), carry_avals + body_const_avals, carry_avals_out)
   body_nconsts = len(body_consts)
 
@@ -541,7 +541,7 @@ def scan(f, init, xs):
   assert carry_avals_out == carry_avals  # TODO type error
   y_avals, _ = unzip2(y_pvals)
   const_avals, _ = unzip2(map(_abstractify, consts))
-  jaxpr = core.TypedJaxpr(pe._closure_convert_jaxpr(jaxpr),
+  jaxpr = core.TypedJaxpr(pe.closure_convert_jaxpr(jaxpr),
                           (), const_avals + carry_avals + x_avals,
                           carry_avals + y_avals)
   out = scan_p.bind(*itertools.chain(consts, in_flat),
@@ -555,20 +555,35 @@ def _scan_impl(*args, **kwargs):
   jaxpr = kwargs.pop("jaxpr")
   assert not kwargs
   consts, init, xs = split_list(args, [num_consts, num_carry])
-  update_array = partial(lax.dynamic_update_index_in_dim, axis=0)
+  _, _, x_avals = split_list(jaxpr.in_avals, [num_consts, num_carry])
+  _, y_avals = split_list(jaxpr.out_avals, [num_carry])
 
   def body_fun(i, vals):
     idx = i if forward else length - i - 1
     carry, ys = split_list(vals, [num_carry])
-    x = [x[i] for x in xs]
+    x = map(partial(_index_array, i), x_avals, xs)
     out_flat = core.jaxpr_as_fun(jaxpr)(*(consts + carry + x))
     carry_out, y_updates = split_list(out_flat, [num_carry])
-    ys_out = [update_array(y, u, i) for y, u in zip(ys, y_updates)]
+    ys_out = map(partial(_update_array, i), y_avals, ys, y_updates)
     return carry_out + ys_out
 
-  _, y_aval = split_list(jaxpr.out_avals, [num_carry])
-  ys_init = [lax.full((length,) + aval.shape, 0, aval.dtype) for aval in y_aval]
+  ys_init = map(partial(_empty_array, length), y_avals)
   return fori_loop(0, length, body_fun, init + ys_init)
+
+def _index_array(i, aval, x):
+  return core.unit if aval is core.abstract_unit else x[i]
+
+def _empty_array(sz, aval):
+  if aval is core.abstract_unit:
+    return core.unit
+  else:
+    return lax.full((sz,) + aval.shape, 0, aval.dtype)
+
+def _update_array(i, aval, xs, x):
+  if aval is core.abstract_unit:
+    return core.unit
+  else:
+    return lax.dynamic_update_index_in_dim(xs, x, i, 0)
 
 def _scan_jvp(primals, tangents, forward, length, jaxpr, num_consts, num_carry):
   num_xs = len(jaxpr.in_avals) - num_carry - num_consts
@@ -588,6 +603,7 @@ def _scan_jvp(primals, tangents, forward, length, jaxpr, num_consts, num_carry):
       carry_nz = carry_nz_out
   else:
     raise FixedPointError
+  # TODO is this lifting logic wrong?
   tangents = [ad.instantiate_zeros(x, t) if t is ad_util.zero and nz else t
               for x, t, nz in zip(primals, tangents, nonzeros)]
 
@@ -602,7 +618,7 @@ def _scan_jvp(primals, tangents, forward, length, jaxpr, num_consts, num_carry):
 
   out_flat = scan_p.bind(
       *(consts + consts_dot + init + init_dot + xs + xs_dot),
-      forward=True, length=length, jaxpr=jaxpr_jvp,
+      forward=forward, length=length, jaxpr=jaxpr_jvp,
       num_consts=num_consts+len(consts_dot), num_carry=num_carry+len(init_dot))
 
   carry, carry_dot, ys, ys_dot = split_list(out_flat, [num_carry, len(init_dot), num_ys])
@@ -615,6 +631,52 @@ def _prune_zeros(ts):
   return [t for t in ts if t is not ad_util.zero]
 
 def _scan_partial_eval(trace, *tracers, **kwargs):
+  forward, length = kwargs.pop("forward"), kwargs.pop("length")
+  num_consts, num_carry = kwargs.pop("num_consts"), kwargs.pop("num_carry")
+  jaxpr = kwargs.pop("jaxpr")
+  assert not kwargs
+  num_xs = len(jaxpr.in_avals) - num_carry - num_consts
+  num_ys = len(jaxpr.out_avals) - num_carry
+
+  unknowns = [t.pval[0] is not None for t in tracers]
+  const_uk, init_uk, xs_uk = split_list(unknowns, [num_consts, num_carry])
+
+  carry_uk = init_uk
+  for _ in range(1000):
+    unknowns = const_uk + carry_uk + xs_uk
+    jaxpr_1, jaxpr_2, out_uk = pe.partial_eval_jaxpr(
+        jaxpr, unknowns, instantiate=carry_uk + [False] * num_ys)
+    carry_uk_out, ys_uk = out_uk[:num_carry], out_uk[num_carry:]
+    if carry_uk_out == carry_uk:
+      break
+    else:
+      carry_uk = carry_uk_out
+  else:
+    raise FixedPointError
+  tracers = [trace.instantiate_const(t) if t.pval[0] is None and uk else t
+             for t, uk in zip(tracers, unknowns)]
+
+  _, in_consts = unzip2(t.pval for t in tracers)
+
+  carry_avals, y_avals = split_list(jaxpr.out_avals, [num_carry])
+  ys_avals = map(partial(_promote_aval_rank, length), y_avals)
+  out_avals = carry_avals + ys_avals
+  out_pvs = [aval if uk else None for aval, uk in zip(out_avals, out_uk)]
+
+  out_flat = scan_p.bind(
+      *in_consts, forward=forward, length=length, jaxpr=jaxpr_1,
+      num_consts=num_consts, num_carry=num_carry)
+  out_carry, ys, residuals = split_list(out_flat, [num_carry, num_ys])
+  out_consts = out_carry + ys
+  residual_tracers = map(trace.new_instantiated_const, residuals)
+  out_tracers = [pe.JaxprTracer(trace, pe.PartialVal((pv, const)), None)
+                 for pv, const in zip(out_pvs, out_consts)]
+  eqn = pe.new_jaxpr_eqn(tracers + residual_tracers, out_tracers, scan_p, (),
+                         dict(forward=forward, length=length, jaxpr=jaxpr_2,
+                              num_consts=num_consts, num_carry=num_carry))
+  for t in out_tracers: t.recipe = eqn
+  return out_tracers
+
   assert False, "update it"
   jaxpr = kwargs.pop('jaxpr')
   length = kwargs.pop('length')
@@ -639,7 +701,7 @@ def _scan_partial_eval(trace, *tracers, **kwargs):
   consts_tracer, init_tracer, xs_tracer = tracers
   lifted_init_tracer = _lift_tracer(trace, init_tracer, sc_carry)
   lifted_tracers = consts_tracer, lifted_init_tracer, xs_tracer
-  in_pvs, in_consts = unzip2([t.pval for t in lifted_tracers])
+  _, in_consts = unzip2([t.pval for t in lifted_tracers])
 
   carry_aval, y_aval = jaxpr.out_aval
   ys_aval = _promote_aval_rank(length, y_aval)
@@ -656,27 +718,11 @@ def _scan_partial_eval(trace, *tracers, **kwargs):
                       dict(forward=forward, length=length, jaxpr=jaxpr_2))
   return pe.JaxprTracer(trace, pe.PartialVal((out_pv, out_const)), eqn)
 
-def _lift_tracer(trace, tracer, is_unknown):
-  t = type(is_unknown)
-  if t is bool:
-    if is_unknown:
-      return trace.instantiate_const(tracer)
-    else:
-      return tracer
-  elif t is tuple:
-    tracers = map(trace.full_raise, tracer)
-    return core.pack(map(partial(_lift_tracer, trace), tracers, is_unknown))
+def _promote_aval_rank(sz, aval):
+  if aval is core.abstract_unit:
+    return core.abstract_unit
   else:
-    raise TypeError(t)
-
-def _put_known_pvs(is_unknown, aval):
-  if is_unknown is False:
-    return None
-  elif is_unknown is True:
-    return aval
-  else:
-    return pe.JaxprTracerTuple(map(_put_known_pvs, is_unknown, aval))
-
+    return ShapedArray((sz,) + aval.shape, aval.dtype)
 
 def _scan_transpose(ct, consts, init, xs, forward, length, jaxpr):
   assert False, "update it"
@@ -827,13 +873,10 @@ def _scan_batching_rule(batched_args, batch_dims, forward, length, jaxpr):
 
 
 # We use a custom bind for scan just to add some error checks
-def scan_bind(consts, init, xs, forward, length, jaxpr):
-  if not core.skip_checks:
-    assert type(jaxpr.in_avals) is tuple
-    consts_aval, init_aval, xs_aval = jaxpr.in_avals
-    assert type(jaxpr.out_aval) is core.AbstractTuple
-    carry_aval, y_aval = jaxpr.out_aval
-    # assert init_aval == carry_aval  # TODO(mattjj): handle unit tree prefixes
+def scan_bind(*args, **kwargs):
+  consts_aval, init_aval, xs_aval = jaxpr.in_avals
+  carry_aval, y_aval = jaxpr.out_aval
+  # assert init_aval == carry_aval  # TODO(mattjj): handle unit tree prefixes
   return core.Primitive.bind(scan_p, consts, init, xs,
                              forward=forward, length=length, jaxpr=jaxpr)
 

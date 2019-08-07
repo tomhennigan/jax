@@ -487,7 +487,8 @@ class Bot(AbstractValue): pass
 
 bot = Bot()
 
-class AbstractUnit(AbstractValue): pass
+class AbstractUnit(AbstractValue):
+  def join(self, other): return self
 
 abstract_unit = AbstractUnit()
 
@@ -530,8 +531,10 @@ def get_aval(x):
 pytype_aval_mappings = {}
 
 
-class Unit(object): pass
+class Unit(object):
+  def __repr__(self): return '*'
 unit = Unit()
+literalable_types.add(Unit)
 
 class UnitVar(object):
   def __repr__(self): return '*'

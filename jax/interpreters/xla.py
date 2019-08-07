@@ -416,7 +416,6 @@ translations[ad_util.add_jaxvals_p] = add_jaxvals_translation_rule
 def lower_fun(fun, instantiate=False, initial_style=False):
   """Build a translation rule for a traceable function."""
   def f(c, *args, **params):
-    assert False, "update me"  # TODO
     if initial_style:
       axis_env, xla_args = args[0], args[1:]
     else:
@@ -429,6 +428,12 @@ def lower_fun(fun, instantiate=False, initial_style=False):
     built_c = jaxpr_computation(jaxpr, axis_env, consts, (), *xla_shapes)
     return c.Call(built_c, xla_args)
   return f
+
+def _aval_from_xla_shape(xla_shape):
+  if xla_shape.is_tuple() and not xla_shape.tuple_shapes():
+    return core.abstract_unit
+  else:
+    return ShapedArray(xla_shape.dimensions(), xla_shape.element_type())
 
 
 ### device-persistent data
