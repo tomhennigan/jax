@@ -677,54 +677,37 @@ def _scan_partial_eval(trace, *tracers, **kwargs):
   for t in out_tracers: t.recipe = eqn
   return out_tracers
 
-  assert False, "update it"
-  jaxpr = kwargs.pop('jaxpr')
-  length = kwargs.pop('length')
-  forward = kwargs.pop('forward')
-  assert not kwargs
-  in_pvs, _ = unzip2([t.pval for t in tracers])
-  sc_consts, sc_init, sc_xs = map(pe.unknown, in_pvs)
-
-  sc_carry = sc_init
-  for i in range(1000):
-    second_components = (sc_consts, sc_carry, sc_xs)
-    jaxpr_1, jaxpr_2, sc_out = pe.partial_eval_jaxpr(jaxpr, second_components,
-                                                     instantiate=(sc_carry, False))
-    sc_carry_out, sc_ys = sc_out
-    if _binary_lattice_eq(sc_carry_out, sc_carry):
-      break
-    else:
-      sc_carry = _binary_lattice_join(sc_carry, sc_carry_out)
-  else:
-    raise FixedPointError
-
-  consts_tracer, init_tracer, xs_tracer = tracers
-  lifted_init_tracer = _lift_tracer(trace, init_tracer, sc_carry)
-  lifted_tracers = consts_tracer, lifted_init_tracer, xs_tracer
-  _, in_consts = unzip2([t.pval for t in lifted_tracers])
-
-  carry_aval, y_aval = jaxpr.out_aval
-  ys_aval = _promote_aval_rank(length, y_aval)
-  out_aval = core.AbstractTuple((carry_aval, ys_aval))
-  out_pv = _put_known_pvs(sc_out, out_aval)
-
-  out_carry, (ys, residuals) = scan_p.bind(
-      *in_consts, forward=forward, length=length, jaxpr=jaxpr_1)
-  out_const = core.pack((out_carry, ys))
-  residuals_tracer = trace.new_instantiated_const(core.pack(residuals))
-  d, c, a = lifted_tracers
-  new_tracers = (d, c, (a, residuals_tracer))
-  eqn = core.JaxprEqn(new_tracers, None, scan_p, (), True, False,
-                      dict(forward=forward, length=length, jaxpr=jaxpr_2))
-  return pe.JaxprTracer(trace, pe.PartialVal((out_pv, out_const)), eqn)
-
 def _promote_aval_rank(sz, aval):
   if aval is core.abstract_unit:
     return core.abstract_unit
   else:
     return ShapedArray((sz,) + aval.shape, aval.dtype)
 
-def _scan_transpose(ct, consts, init, xs, forward, length, jaxpr):
+def _scan_transpose(cts, *args, **kwargs):
+  forward, length = kwargs.pop("forward"), kwargs.pop("length")
+  num_consts, num_carry = kwargs.pop("num_consts"), kwargs.pop("num_carry")
+  jaxpr = kwargs.pop("jaxpr")
+  assert not kwargs
+  num_res = sum(x is not ad.undefined_primal for x in args)
+  num_xs = len(jaxpr.in_avals) - num_carry - num_consts
+  num_ys = len(jaxpr.out_avals) - num_carry
+
+  consts, init, xs, res = split_list(args, [num_consts, num_carry, num_xs - num_res])
+  assert all(x is ad.undefined_primal for x in itertools.chain(consts, init, xs))
+  ct_carry, ct_ys = split_list(cts, [num_carry])
+
+  # jaxpr :: (d, c, a, res) -> (c, b)
+  # jaxpr_lifted :: (res, d, c, a) -> (c, b)
+  # jaxpr_lifted_trans :: (res, CT c, CT b) -> (CT d, CT c, CT a)
+  # jaxpr_trans :: (CT c, CT d, CT b, res) -> (CT c, CT d, CT a)
+  jaxpr = jaxpr.copy()
+  num_lin = len(args) - num_res
+  jaxpr.jaxpr.invars = jaxpr.jaxpr.invars[num_lin:] + jaxpr.jaxpr.invars[:num_lin]
+  jaxpr_trans = _transpose_jaxpr(jaxpr, num_res)
+
+
+  import ipdb; ipdb.set_trace()
+
   assert False, "update it"
   assert consts is ad.undefined_primal and init is ad.undefined_primal
   assert type(xs) is tuple
