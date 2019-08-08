@@ -484,12 +484,12 @@ def partial_eval_jaxpr(jaxpr, unknowns, instantiate):
   jaxpr_1, out_pvals, consts_1 = trace_to_jaxpr(lu.wrap_init(fun), pvals, instantiate=True)
   (out_pvs_2, jaxpr_2, num_res), = cell
 
-  #               jaxpr_1 :: (d1, c1, a1) -> (c1, b1, res)
-  #               jaxpr_2 :: res | (d2, c2, a2) -> (c2, b2)
-  #        lifted_jaxpr_2 :: (res, d2, c2, a2) -> (c2, b2)
-  # doubly_lifted_jaxpr_2 :: (d2, c2, a2, res) -> (c2, b2)
+  #   jaxpr :: a -> b
+  # jaxpr_1 :: a1 -> [b1, res]
+  # jaxpr_2 :: res | a2 -> b2
   jaxpr_2 = closure_convert_jaxpr(jaxpr_2)
   jaxpr_2.invars= jaxpr_2.invars[num_res:] + jaxpr_2.invars[:num_res]
+  # jaxpr_2 :: [a2, res] -> b2
   uk_out = [pv is not None for pv in out_pvs_2]
 
   in_avals_1, in_avals_2 = unzip2(map(_split_aval, unknowns, jaxpr.in_avals))
@@ -504,61 +504,6 @@ def partial_eval_jaxpr(jaxpr, unknowns, instantiate):
   typed_jaxpr_2 = TypedJaxpr(jaxpr_2, (), in_avals_2, out_avals_2)
   return typed_jaxpr_1, typed_jaxpr_2, uk_out
 
-  # assert False, "update it"
-  # # jaxpr :: d -> c -> a -> (c, b)
-  # f = lu.wrap_init(core.jaxpr_as_fun(jaxpr))
-
-  # cell = []
-  # # we do some final-style output munging to place residuals
-  # # fun :: d1 -> c1 -> a1 -> (c1, (b1, res))
-  # def fun(*vals):
-  #   pvals = map(as_pval, jaxpr.in_avals, second_components, vals)
-  #   jaxpr_2, out_pval, consts_2 = trace_to_jaxpr(f, pvals, instantiate=instantiate)
-  #   out_pv, out_const = out_pval
-  #   out_pv = (None, None) if out_pv is None else out_pv
-  #   out_const = (core.unit, core.unit) if out_const is core.unit else out_const
-  #   out_pv_c, out_pv_b = out_pv
-  #   out_const_c, out_const_b = out_const
-  #   cell.append((out_pv_c, out_pv_b, jaxpr_2))
-  #   return pack((out_const_c, pack((out_const_b, pack(consts_2)))))
-
-  # pvals = map(as_pval2, jaxpr.in_avals, second_components)
-  # jaxpr_1, out_pval, consts_1 = trace_to_jaxpr(
-  #     lu.wrap_init(fun), pvals, instantiate=True)
-  # out_pv_c, out_pv_b, jaxpr_2 = cell[0]
-
-  # #               jaxpr_1 :: d1 -> c1 -> a1 -> (c1, (b1, res))
-  # #               jaxpr_2 :: res | d2 -> c2 -> a2 -> (c2, b2)
-  # #        lifted_jaxpr_2 :: res -> d2 -> c2 -> a2 -> (c2, b2)
-  # # doubly_lifted_jaxpr_2 :: d2 -> c2 -> (a2, res) -> (c2, b2)
-  # lifted_jaxpr_2 = _closure_convert_jaxpr(jaxpr_2)
-  # doubly_lifted_jaxpr_2 = _move_and_pair_arg(lifted_jaxpr_2)
-  # sc_out = sc_c_out, sc_b_out = unknown(out_pv_c), unknown(out_pv_b)
-
-  # in_avals_1, in_avals_2 = unzip2(map(_split_avals, second_components,
-  #                                     jaxpr.in_avals))
-  # out_aval_1, out_aval_2 = _split_avals(sc_out, jaxpr.out_aval)
-
-  # # in_avals_1 is already (d1, c1, a1), and out_aval_2 is already (c2, b2), but
-  # # we must munge:
-  # # 1. form out_aval_1 to include the residuals as (c1, (b1, res))
-  # # 2. form in_avals_2 to include the residuals as (d2, c2, (a2, res))
-
-  # out_pv, _ = out_pval
-  # _, (_, res) = out_pv
-  # assert isinstance(res, AbstractValue)
-
-  # c1, b1 = out_aval_1
-  # lifted_out_aval_1 = AbstractTuple((c1, AbstractTuple((b1, res))))
-
-  # d2, c2, a2 = in_avals_2
-  # lifted_in_avals_2 = (d2, c2, AbstractTuple((a2, res)))
-
-  # typed_jaxpr_1 = TypedJaxpr(jaxpr_1, consts_1, in_avals_1, lifted_out_aval_1)
-  # typed_jaxpr_2 = TypedJaxpr(doubly_lifted_jaxpr_2, (), lifted_in_avals_2,
-  #                            out_aval_2)
-  # return typed_jaxpr_1, typed_jaxpr_2, sc_out
-
 def _split_aval(unknown, aval):
   return (abstract_unit, aval) if unknown else (aval, abstract_unit)
 
@@ -568,21 +513,6 @@ def _move_and_pair_arg(jaxpr):
   moved_jaxpr.invars = [d, c, (a, res)]
   core.skip_checks or core.check_jaxpr(moved_jaxpr)
   return moved_jaxpr
-
-# def _split_avals(second_component, aval):
-#   assert False, "update it"
-#   t = type(second_component)
-#   if t is tuple:
-#     assert type(aval) is AbstractTuple
-#     avals1, avals2 = unzip2(map(_split_avals, second_component, aval))
-#     return AbstractTuple(avals1), AbstractTuple(avals2)
-#   elif t is bool:
-#     if second_component:
-#       return AbstractTuple(()), aval
-#     else:
-#       return aval, AbstractTuple(())
-#   else:
-#     raise TypeError(t)
 
 
 custom_partial_eval_rules = {}

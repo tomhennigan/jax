@@ -571,7 +571,10 @@ def _scan_impl(*args, **kwargs):
   return fori_loop(0, length, body_fun, init + ys_init)
 
 def _index_array(i, aval, x):
-  return core.unit if aval is core.abstract_unit else x[i]
+  if aval is core.abstract_unit:
+    return core.unit
+  else:
+    return lax.dynamic_index_in_dim(x, i, keepdims=False)
 
 def _empty_array(sz, aval):
   if aval is core.abstract_unit:
@@ -694,55 +697,98 @@ def _scan_transpose(cts, *args, **kwargs):
 
   consts, init, xs, res = split_list(args, [num_consts, num_carry, num_xs - num_res])
   assert all(x is ad.undefined_primal for x in itertools.chain(consts, init, xs))
+  assert all(x is not ad.undefined_primal for x in res)
+
+  carry_avals, y_avals = split_list(jaxpr.out_avals, [num_carry])
+  ys_avals = map(partial(_promote_aval_rank, length), y_avals)
   ct_carry, ct_ys = split_list(cts, [num_carry])
+  ct_carry = map(ad.instantiate_zeros_aval, carry_avals, ct_carry)
+  ct_ys = map(ad.instantiate_zeros_aval, ys_avals, ct_ys)
+  ct_consts = map(ad_util.zeros_like_aval, jaxpr.in_avals[:num_consts])
 
-  # jaxpr :: (d, c, a, res) -> (c, b)
-  # jaxpr_lifted :: (res, d, c, a) -> (c, b)
-  # jaxpr_lifted_trans :: (res, CT c, CT b) -> (CT d, CT c, CT a)
-  # jaxpr_trans :: (CT c, CT d, CT b, res) -> (CT c, CT d, CT a)
-  jaxpr = jaxpr.copy()
-  num_lin = len(args) - num_res
-  jaxpr.jaxpr.invars = jaxpr.jaxpr.invars[num_lin:] + jaxpr.jaxpr.invars[:num_lin]
-  jaxpr_trans = _transpose_jaxpr(jaxpr, num_res)
+  #       jaxpr :: [d, c, a, res] -> [c, b]
+  # jaxpr_trans :: [CT d, CT c, CT b, res] -> [CT d, CT c, CT a]
+  jaxpr_trans = _transpose_jaxpr2(num_consts, num_res, jaxpr)
 
+  outs = scan_p.bind(
+      *(ct_consts + ct_carry + ct_ys + res), forward=not forward, length=length,
+      jaxpr=jaxpr_trans, num_consts=0, num_carry=num_consts+num_carry)
+  ct_consts, ct_init, ct_xs = split_list(outs, [num_consts, num_carry])
+  return ct_consts + ct_init + ct_xs + [None] * num_res
 
-  import ipdb; ipdb.set_trace()
+  # assert False, "update it"
+  # assert consts is ad.undefined_primal and init is ad.undefined_primal
+  # assert type(xs) is tuple
+  # a, res = xs
+  # assert a is ad.undefined_primal and res is not ad.undefined_primal
 
-  assert False, "update it"
-  assert consts is ad.undefined_primal and init is ad.undefined_primal
-  assert type(xs) is tuple
-  a, res = xs
-  assert a is ad.undefined_primal and res is not ad.undefined_primal
+  # # jaxpr :: d -> c -> (a, res) ->  (c, b)
+  # # jaxpr_lifted :: res -> (d, c, a) -> (c, b)
+  # # jaxpr_lifted_trans :: res -> (CT c, CT b) -> (CT d, CT c, CT a)
+  # # jaxpr_trans :: * -> (CT c, CT d) -> (CT b, res) -> ((CT c, CT d), CT a)
+  # assert type(jaxpr.jaxpr.invars[2]) is tuple  # assume restructuring
+  # jaxpr_lifted = rearrange_binders(
+  #     lambda d, c, a_res: (a_res[1], (d, c, a_res[0])), jaxpr)
+  # jaxpr_lifted_trans = _transpose_jaxpr(jaxpr_lifted)
+  # jaxpr_trans = _move_stuff_and_add_add(jaxpr_lifted_trans)
 
-  # jaxpr :: d -> c -> (a, res) ->  (c, b)
-  # jaxpr_lifted :: res -> (d, c, a) -> (c, b)
-  # jaxpr_lifted_trans :: res -> (CT c, CT b) -> (CT d, CT c, CT a)
-  # jaxpr_trans :: * -> (CT c, CT d) -> (CT b, res) -> ((CT c, CT d), CT a)
-  assert type(jaxpr.jaxpr.invars[2]) is tuple  # assume restructuring
-  jaxpr_lifted = rearrange_binders(
-      lambda d, c, a_res: (a_res[1], (d, c, a_res[0])), jaxpr)
-  jaxpr_lifted_trans = _transpose_jaxpr(jaxpr_lifted)
-  jaxpr_trans = _move_stuff_and_add_add(jaxpr_lifted_trans)
+  # c_aval, b_aval = jaxpr.out_aval
+  # d_aval, c_aval2, _ = jaxpr.in_avals
+  # assert c_aval == c_aval2
+  # bs_aval = _promote_aval_rank(length, b_aval)
+  # ct_d = ad_util.zeros_like_aval(d_aval)
+  # ct_c, ct_bs = ad.instantiate_zeros_aval(core.AbstractTuple((c_aval, bs_aval)), ct)
+  # carry_ct = core.pack((ct_c, ct_d))
 
-  c_aval, b_aval = jaxpr.out_aval
-  d_aval, c_aval2, _ = jaxpr.in_avals
-  assert c_aval == c_aval2
-  bs_aval = _promote_aval_rank(length, b_aval)
-  ct_d = ad_util.zeros_like_aval(d_aval)
-  ct_c, ct_bs = ad.instantiate_zeros_aval(core.AbstractTuple((c_aval, bs_aval)), ct)
-  carry_ct = core.pack((ct_c, ct_d))
+  # # jaxpr_trans :: * -> (CT c, CT d) -> (CT b, res) -> ((CT c, CT d), CT a)
+  # core.check_jaxpr(jaxpr_trans.jaxpr)
+  # unit_aval, (ct_c_aval, ct_d_aval), (ct_b_aval, _) = jaxpr_trans.in_avals
+  # assert core.lattice_join(ct_c_aval, core.get_aval(ct_c)) == ct_c_aval
+  # assert core.lattice_join(ct_d_aval, core.get_aval(ct_d)) == ct_d_aval
 
-  # jaxpr_trans :: * -> (CT c, CT d) -> (CT b, res) -> ((CT c, CT d), CT a)
-  core.check_jaxpr(jaxpr_trans.jaxpr)
-  unit_aval, (ct_c_aval, ct_d_aval), (ct_b_aval, _) = jaxpr_trans.in_avals
-  assert core.lattice_join(ct_c_aval, core.get_aval(ct_c)) == ct_c_aval
-  assert core.lattice_join(ct_d_aval, core.get_aval(ct_d)) == ct_d_aval
+  # out = scan_p.bind(
+  #     core.unit, carry_ct, core.pack((ct_bs, res)),
+  #     forward=not forward, length=length, jaxpr=jaxpr_trans)
+  # (ct_init, ct_consts), ct_as = out
+  # return ct_consts, ct_init, (ct_as, None)
 
-  out = scan_p.bind(
-      core.unit, carry_ct, core.pack((ct_bs, res)),
-      forward=not forward, length=length, jaxpr=jaxpr_trans)
-  (ct_init, ct_consts), ct_as = out
-  return ct_consts, ct_init, (ct_as, None)
+# transpose_jaxpr :: Int -> ([a, res] -> b) -> ([CT b, res] -> CT a)
+def _transpose_jaxpr(num_res, jaxpr):
+  num_lin = len(jaxpr.in_avals) - num_res
+  num_out = len(jaxpr.out_avals)
+
+  @lu.wrap_init
+  def transposed(*bbar_res):
+    b_bar, res = bbar_res[:num_out], bbar_res[num_out:]
+    primals = (ad.undefined_primal,) * num_lin + res
+    _, abar_res = ad.backward_pass(jaxpr.jaxpr, jaxpr.literals, (), primals, b_bar)
+    return map(ad.instantiate_zeros_aval, jaxpr.in_avals[:num_lin], abar_res[:num_lin])
+  return _make_typed_jaxpr(transposed, jaxpr.out_avals + jaxpr.in_avals[num_lin:])
+
+# transpose_jaxpr2 :: ([c, a, res] -> b) -> ([CT c, CT b, res] -> [CT c, CT a]
+def _transpose_jaxpr2(num_c, num_res, jaxpr):
+  num_a = len(jaxpr.in_avals) - num_c - num_res
+  num_b = len(jaxpr.out_avals)
+  c_avals, a_avals, res_avals = split_list(jaxpr.in_avals, [num_c, num_a])
+  b_avals = list(jaxpr.out_avals)
+
+  @lu.wrap_init
+  def transposed(*cbar_bbar_res):
+    c_bar, b_bar, res = split_list(cbar_bbar_res, [num_c, num_b])
+    primals = [ad.undefined_primal] * (num_c + num_a) + res
+    _, cbar_abar = ad.backward_pass(jaxpr.jaxpr, jaxpr.literals, (), primals,
+                                    c_bar + b_bar)
+    new_c_bar, a_bar, _ = split_list(cbar_abar, [num_c, num_a])
+    a_bar = map(ad.instantiate_zeros_aval, a_avals, a_bar)
+    c_bar = map(ad_util.add_jaxvals, c_bar, new_c_bar)
+    return c_bar + a_bar
+  return _make_typed_jaxpr(transposed, c_avals + b_avals + res_avals)
+
+def _make_typed_jaxpr(traceable, in_avals):
+  pvals = [pe.PartialVal((aval, core.unit)) for aval in in_avals]
+  jaxpr, pvals_out, consts = pe.trace_to_jaxpr(traceable, pvals, instantiate=True)
+  out_avals, _ = unzip2(pvals_out)
+  return core.TypedJaxpr(jaxpr, consts, in_avals, out_avals)
 
 _scan_newvar = pe.gensym('_scan')
 
@@ -793,27 +839,6 @@ def _move_stuff_and_add_add(typed_jaxpr):
 
 def _add_any_eqn(tot, a, b):
   return core.JaxprEqn([a, b], [tot], ad_util.add_jaxvals_p, (), False, False, {})
-
-# transpose_jaxpr :: (res -> a -> b) -> (res -> CT b -> CT a)
-def _transpose_jaxpr(jaxpr):
-  assert len(jaxpr.in_avals) == 2
-
-  @lu.wrap_init
-  def transposed(res, b_bar):
-    _, (_, a_bar) = ad.backward_pass(jaxpr.jaxpr, jaxpr.literals, (),
-                                     (res, ad.undefined_primal), b_bar)
-    a_bar = ad.instantiate_zeros_aval(jaxpr.in_avals[1], a_bar)
-    return a_bar
-
-  transposed_jaxpr = _make_typed_jaxpr(transposed, (jaxpr.in_avals[0], jaxpr.out_aval))
-  return transposed_jaxpr
-
-def _make_typed_jaxpr(traceable, in_avals):
-  pvals = [pe.PartialVal((aval, core.unit)) for aval in in_avals]
-  jaxpr, pval_out, consts = pe.trace_to_jaxpr(traceable, pvals, instantiate=True)
-  out_aval, _ = pval_out
-  assert isinstance(out_aval, core.AbstractValue)
-  return core.TypedJaxpr(jaxpr, consts, in_avals, out_aval)
 
 
 def _scan_batching_rule(batched_args, batch_dims, forward, length, jaxpr):

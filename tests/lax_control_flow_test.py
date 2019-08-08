@@ -494,92 +494,92 @@ class LaxControlFlowTest(jtu.JaxTestCase):
   #   out = lax.while_loop(cond, body, (33, 4))
   #   self.assertEqual(out, (7, 10))
 
-  # @parameterized.named_parameters(
-  #     {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),
-  #      "jit_scan": jit_scan, "jit_f": jit_f}
-  #     for jit_scan in [False, True]
-  #     for jit_f in [False, True])
-  # def testScanImpl(self, jit_scan, jit_f):
-  #   d = np.array([1., 2.])
-  #   def f(c, a):
-  #     assert a.shape == (3,)
-  #     assert c.shape == (4,)
-  #     b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
-  #     c = np.sin(c * b)
-  #     assert b.shape == ()
-  #     return c, b
+  @parameterized.named_parameters(
+      {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),
+       "jit_scan": jit_scan, "jit_f": jit_f}
+      for jit_scan in [False, True]
+      for jit_f in [False, True])
+  def testScanImpl(self, jit_scan, jit_f):
+    d = np.array([1., 2.])
+    def f(c, a):
+      assert a.shape == (3,)
+      assert c.shape == (4,)
+      b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
+      c = np.sin(c * b)
+      assert b.shape == ()
+      return c, b
 
-  #   if jit_f:
-  #     f = api.jit(f)
-  #   if jit_scan:
-  #     scan = api.jit(lax.scan, (0,))
-  #   else:
-  #     scan = lax.scan
+    if jit_f:
+      f = api.jit(f)
+    if jit_scan:
+      scan = api.jit(lax.scan, (0,))
+    else:
+      scan = lax.scan
 
-  #   as_ = np.ones((5, 3))
-  #   c = np.ones(4)
+    as_ = np.ones((5, 3))
+    c = np.ones(4)
 
-  #   ans =                scan(f, c, as_)
-  #   expected = scan_reference(f, c, as_)
-  #   self.assertAllClose(ans, expected, check_dtypes=False)
+    ans =                scan(f, c, as_)
+    expected = scan_reference(f, c, as_)
+    self.assertAllClose(ans, expected, check_dtypes=False)
 
-  # @parameterized.named_parameters(
-  #     {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),
-  #      "jit_scan": jit_scan, "jit_f": jit_f}
-  #     for jit_scan in [False, True]
-  #     for jit_f in [False, True])
-  # def testScanJVP(self, jit_scan, jit_f):
-  #   d = np.array([1., 2.])
-  #   def f(c, a):
-  #     assert a.shape == (3,)
-  #     assert c.shape == (4,)
-  #     b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
-  #     c = np.sin(c * b)
-  #     assert b.shape == ()
-  #     return c, b
+  @parameterized.named_parameters(
+      {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),
+       "jit_scan": jit_scan, "jit_f": jit_f}
+      for jit_scan in [False, True]
+      for jit_f in [False, True])
+  def testScanJVP(self, jit_scan, jit_f):
+    d = np.array([1., 2.])
+    def f(c, a):
+      assert a.shape == (3,)
+      assert c.shape == (4,)
+      b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
+      c = np.sin(c * b)
+      assert b.shape == ()
+      return c, b
 
-  #   if jit_f:
-  #     f = api.jit(f)
-  #   if jit_scan:
-  #     scan = api.jit(lax.scan, (0,))
-  #   else:
-  #     scan = lax.scan
+    if jit_f:
+      f = api.jit(f)
+    if jit_scan:
+      scan = api.jit(lax.scan, (0,))
+    else:
+      scan = lax.scan
 
-  #   as_ = np.ones((5, 3))
-  #   c = np.ones(4)
+    as_ = np.ones((5, 3))
+    c = np.ones(4)
 
-  #   ans = api.jvp(lambda c, as_:                scan(f, c, as_), (c, as_), (c, as_))[1]
-  #   expected = api.jvp(lambda c, as_: scan_reference(f, c, as_), (c, as_), (c, as_))[1]
-  #   self.assertAllClose(ans, expected, check_dtypes=False)
+    ans = api.jvp(lambda c, as_:                scan(f, c, as_), (c, as_), (c, as_))[1]
+    expected = api.jvp(lambda c, as_: scan_reference(f, c, as_), (c, as_), (c, as_))[1]
+    self.assertAllClose(ans, expected, check_dtypes=False)
 
-  # @parameterized.named_parameters(
-  #     {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),
-  #      "jit_scan": jit_scan, "jit_f": jit_f}
-  #     for jit_scan in [False, True]
-  #     for jit_f in [False, True])
-  # def testScanLinearize(self, jit_scan, jit_f):
-  #   d = np.array([1., 2.])
-  #   def f(c, a):
-  #     assert a.shape == (3,)
-  #     assert c.shape == (4,)
-  #     b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
-  #     c = np.sin(c * b)
-  #     assert b.shape == ()
-  #     return c, b
+  @parameterized.named_parameters(
+      {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),
+       "jit_scan": jit_scan, "jit_f": jit_f}
+      for jit_scan in [False, True]
+      for jit_f in [False, True])
+  def testScanLinearize(self, jit_scan, jit_f):
+    d = np.array([1., 2.])
+    def f(c, a):
+      assert a.shape == (3,)
+      assert c.shape == (4,)
+      b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
+      c = np.sin(c * b)
+      assert b.shape == ()
+      return c, b
 
-  #   if jit_f:
-  #     f = api.jit(f)
-  #   if jit_scan:
-  #     scan = api.jit(lax.scan, (0,))
-  #   else:
-  #     scan = lax.scan
+    if jit_f:
+      f = api.jit(f)
+    if jit_scan:
+      scan = api.jit(lax.scan, (0,))
+    else:
+      scan = lax.scan
 
-  #   as_ = np.ones((5, 3))
-  #   c = np.ones(4)
+    as_ = np.ones((5, 3))
+    c = np.ones(4)
 
-  #   ans = api.linearize(lambda c, as_:                scan(f, c, as_), c, as_)[1](c, as_)
-  #   expected = api.linearize(lambda c, as_: scan_reference(f, c, as_), c, as_)[1](c, as_)
-  #   self.assertAllClose(ans, expected, check_dtypes=False)
+    ans = api.linearize(lambda c, as_:                scan(f, c, as_), c, as_)[1](c, as_)
+    expected = api.linearize(lambda c, as_: scan_reference(f, c, as_), c, as_)[1](c, as_)
+    self.assertAllClose(ans, expected, check_dtypes=False)
 
   @parameterized.named_parameters(
       {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),

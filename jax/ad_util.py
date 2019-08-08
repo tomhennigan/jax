@@ -16,7 +16,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from .core import lattice_join, Primitive, Unit, unit
+from .core import lattice_join, Primitive, Unit, unit, AbstractUnit, abstract_unit
 from .tree_util import register_pytree_node
 from .util import safe_map
 
@@ -46,7 +46,9 @@ jaxval_zeros_likers = {}
 
 def zeros_like_aval(aval):
   return aval_zeros_likers[type(aval)](aval)
+
 aval_zeros_likers = {}
+aval_zeros_likers[AbstractUnit] = lambda _: unit
 
 def zeros_like_jaxval(val):
   return zeros_like_p.bind(val)
