@@ -494,174 +494,186 @@ class LaxControlFlowTest(jtu.JaxTestCase):
   #   out = lax.while_loop(cond, body, (33, 4))
   #   self.assertEqual(out, (7, 10))
 
-  @parameterized.named_parameters(
-      {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),
-       "jit_scan": jit_scan, "jit_f": jit_f}
-      for jit_scan in [False, True]
-      for jit_f in [False, True])
-  def testScanImpl(self, jit_scan, jit_f):
-    d = np.array([1., 2.])
-    def f(c, a):
-      assert a.shape == (3,)
-      assert c.shape == (4,)
-      b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
-      c = np.sin(c * b)
-      assert b.shape == ()
-      return c, b
+  # @parameterized.named_parameters(
+  #     {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),
+  #      "jit_scan": jit_scan, "jit_f": jit_f}
+  #     for jit_scan in [False, True]
+  #     for jit_f in [False, True])
+  # def testScanImpl(self, jit_scan, jit_f):
+  #   d = np.array([1., 2.])
+  #   def f(c, a):
+  #     assert a.shape == (3,)
+  #     assert c.shape == (4,)
+  #     b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
+  #     c = np.sin(c * b)
+  #     assert b.shape == ()
+  #     return c, b
 
-    if jit_f:
-      f = api.jit(f)
-    if jit_scan:
-      scan = api.jit(lax.scan, (0,))
-    else:
-      scan = lax.scan
+  #   if jit_f:
+  #     f = api.jit(f)
+  #   if jit_scan:
+  #     scan = api.jit(lax.scan, (0,))
+  #   else:
+  #     scan = lax.scan
 
-    as_ = np.ones((5, 3))
-    c = np.ones(4)
+  #   as_ = np.ones((5, 3))
+  #   c = np.ones(4)
 
-    ans =                scan(f, c, as_)
-    expected = scan_reference(f, c, as_)
+  #   ans =                scan(f, c, as_)
+  #   expected = scan_reference(f, c, as_)
+  #   self.assertAllClose(ans, expected, check_dtypes=False)
+
+#   @parameterized.named_parameters(
+#       {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),
+#        "jit_scan": jit_scan, "jit_f": jit_f}
+#       for jit_scan in [False, True]
+#       for jit_f in [False, True])
+#   def testScanJVP(self, jit_scan, jit_f):
+#     d = np.array([1., 2.])
+#     def f(c, a):
+#       assert a.shape == (3,)
+#       assert c.shape == (4,)
+#       b = np.cos(np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d)))
+#       c = np.sin(c * b)
+#       assert b.shape == ()
+#       return c, b
+
+#     if jit_f:
+#       f = api.jit(f)
+#     if jit_scan:
+#       scan = api.jit(lax.scan, (0,))
+#     else:
+#       scan = lax.scan
+
+#     rng = onp.random.RandomState(0)
+#     as_ = rng.randn(5, 3)
+#     c = rng.randn(4)
+
+#     ans = api.jvp(lambda c, as_:                scan(f, c, as_), (c, as_), (c, as_))
+#     expected = api.jvp(lambda c, as_: scan_reference(f, c, as_), (c, as_), (c, as_))
+#     self.assertAllClose(ans, expected, check_dtypes=False)
+
+  # @parameterized.named_parameters(
+  #     {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),
+  #      "jit_scan": jit_scan, "jit_f": jit_f}
+  #     for jit_scan in [False, True]
+  #     for jit_f in [False, True])
+  # def testScanLinearize(self, jit_scan, jit_f):
+  #   d = np.array([1., 2.])
+  #   def f(c, a):
+  #     assert a.shape == (3,)
+  #     assert c.shape == (4,)
+  #     b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
+  #     c = np.sin(c * b)
+  #     assert b.shape == ()
+  #     return c, b
+
+  #   if jit_f:
+  #     f = api.jit(f)
+  #   if jit_scan:
+  #     scan = api.jit(lax.scan, (0,))
+  #   else:
+  #     scan = lax.scan
+
+  #   as_ = np.ones((5, 3))
+  #   c = np.ones(4)
+
+  #   ans = api.linearize(lambda c, as_:                scan(f, c, as_), c, as_)[1](c, as_)
+  #   expected = api.linearize(lambda c, as_: scan_reference(f, c, as_), c, as_)[1](c, as_)
+  #   self.assertAllClose(ans, expected, check_dtypes=False)
+
+  # @parameterized.named_parameters(
+  #     {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),
+  #      "jit_scan": jit_scan, "jit_f": jit_f}
+  #     for jit_scan in [False, True]
+  #     for jit_f in [False, True])
+  # def testScanGrad(self, jit_scan, jit_f):
+  #   d = np.ones(2)
+  #   def f(c, a):
+  #     assert a.shape == (3,)
+  #     assert c.shape == (4,)
+  #     b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
+  #     c = np.sin(c * b)
+  #     assert b.shape == ()
+  #     return c, b
+
+  #   if jit_f:
+  #     f = api.jit(f)
+  #   if jit_scan:
+  #     scan = api.jit(lax.scan, (0,))
+  #   else:
+  #     scan = lax.scan
+
+  #   as_ = np.ones((5, 3))
+  #   c = np.ones(4)
+
+  #   ans = api.grad(lambda c, as_:      list(          scan(f, c, as_))[0].sum())(c, as_)
+  #   expected = api.grad(lambda c, as_: list(scan_reference(f, c, as_))[0].sum())(c, as_)
+  #   self.assertAllClose(ans, expected, check_dtypes=False)
+
+  def testScanRnn(self):
+    r = npr.RandomState(0)
+
+    n_in = 4
+    n_hid = 2
+    n_out = 1
+    length = 3
+
+    W_trans = r.randn(n_hid, n_hid + n_in)
+    W_out = r.randn(n_out, n_hid + n_in)
+    params = W_trans, W_out
+
+    inputs = r.randn(length, n_in)
+    targets = r.randn(length, n_out)
+
+    def step(params, state, input):
+      W_trans, W_out = params
+      stacked = np.concatenate([state, input])
+      output = np.tanh(np.dot(W_out, stacked))
+      next_state = np.tanh(np.dot(W_trans, stacked))
+      return next_state, output
+
+    def rnn(params, inputs):
+      init_state = np.zeros(n_hid)
+      _, outputs = lax.scan(partial(step, params), init_state, inputs)
+      return outputs
+
+    def loss(params, inputs, targets):
+      predictions = rnn(params, inputs)
+      return np.sum((predictions - targets)**2)
+
+    # # evaluation doesn't crash
+    # loss(params, inputs, targets)
+
+    # # jvp evaluation doesn't crash
+    # api.jvp(lambda params: loss(params, inputs, targets), (params,), (params,))
+
+    # # jvp numerical check passes
+    # jtu.check_grads(loss, (params, inputs, targets), order=1, modes=["fwd"])
+
+    # linearize works
+    _, expected = api.jvp(loss, (params, inputs, targets),
+                          (params, inputs, targets))
+    _, linfun = api.linearize(loss, params, inputs, targets)
+    ans = linfun(params, inputs, targets)
     self.assertAllClose(ans, expected, check_dtypes=False)
 
-  @parameterized.named_parameters(
-      {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),
-       "jit_scan": jit_scan, "jit_f": jit_f}
-      for jit_scan in [False, True]
-      for jit_f in [False, True])
-  def testScanJVP(self, jit_scan, jit_f):
-    d = np.array([1., 2.])
-    def f(c, a):
-      assert a.shape == (3,)
-      assert c.shape == (4,)
-      b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
-      c = np.sin(c * b)
-      assert b.shape == ()
-      return c, b
+    # gradient evaluation doesn't crash
+    api.grad(loss)(params, inputs, targets)
 
-    if jit_f:
-      f = api.jit(f)
-    if jit_scan:
-      scan = api.jit(lax.scan, (0,))
-    else:
-      scan = lax.scan
+    # gradient check passes
+    jtu.check_grads(loss, (params, inputs, targets), order=1)
 
-    as_ = np.ones((5, 3))
-    c = np.ones(4)
-
-    ans = api.jvp(lambda c, as_:                scan(f, c, as_), (c, as_), (c, as_))[1]
-    expected = api.jvp(lambda c, as_: scan_reference(f, c, as_), (c, as_), (c, as_))[1]
-    self.assertAllClose(ans, expected, check_dtypes=False)
-
-  @parameterized.named_parameters(
-      {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),
-       "jit_scan": jit_scan, "jit_f": jit_f}
-      for jit_scan in [False, True]
-      for jit_f in [False, True])
-  def testScanLinearize(self, jit_scan, jit_f):
-    d = np.array([1., 2.])
-    def f(c, a):
-      assert a.shape == (3,)
-      assert c.shape == (4,)
-      b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
-      c = np.sin(c * b)
-      assert b.shape == ()
-      return c, b
-
-    if jit_f:
-      f = api.jit(f)
-    if jit_scan:
-      scan = api.jit(lax.scan, (0,))
-    else:
-      scan = lax.scan
-
-    as_ = np.ones((5, 3))
-    c = np.ones(4)
-
-    ans = api.linearize(lambda c, as_:                scan(f, c, as_), c, as_)[1](c, as_)
-    expected = api.linearize(lambda c, as_: scan_reference(f, c, as_), c, as_)[1](c, as_)
-    self.assertAllClose(ans, expected, check_dtypes=False)
-
-  @parameterized.named_parameters(
-      {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),
-       "jit_scan": jit_scan, "jit_f": jit_f}
-      for jit_scan in [False, True]
-      for jit_f in [False, True])
-  def testScanGrad(self, jit_scan, jit_f):
-    d = np.ones(2)
-    def f(c, a):
-      assert a.shape == (3,)
-      assert c.shape == (4,)
-      b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
-      c = np.sin(c * b)
-      assert b.shape == ()
-      return c, b
-
-    if jit_f:
-      f = api.jit(f)
-    if jit_scan:
-      scan = api.jit(lax.scan, (0,))
-    else:
-      scan = lax.scan
-
-    as_ = np.ones((5, 3))
-    c = np.ones(4)
-
-    ans = api.grad(lambda c, as_:      list(          scan(f, c, as_))[0].sum())(c, as_)
-    expected = api.grad(lambda c, as_: list(scan_reference(f, c, as_))[0].sum())(c, as_)
-    self.assertAllClose(ans, expected, check_dtypes=False)
-
-  # def testScanRnn(self):
-  #   r = npr.RandomState(0)
-
-  #   n_in = 4
-  #   n_hid = 2
-  #   n_out = 1
-  #   length = 3
-
-  #   W_trans = r.randn(n_hid, n_hid + n_in)
-  #   W_out = r.randn(n_out, n_hid + n_in)
-  #   params = W_trans, W_out
-
-  #   inputs = r.randn(length, n_in)
-  #   targets = r.randn(length, n_out)
-
-  #   def step(params, state, input):
-  #     W_trans, W_out = params
-  #     stacked = np.concatenate([state, input])
-  #     output = np.tanh(np.dot(W_out, stacked))
-  #     next_state = np.tanh(np.dot(W_trans, stacked))
-  #     return next_state, output
-
-  #   def rnn(params, inputs):
-  #     init_state = np.zeros(n_hid)
-  #     _, outputs = lax.scan(partial(step, params), init_state, inputs)
-  #     return outputs
-
-  #   def loss(params, inputs, targets):
-  #     predictions = rnn(params, inputs)
-  #     return np.sum((predictions - targets)**2)
-
-  #   # evaluation doesn't crash
-  #   loss(params, inputs, targets)
-
-  #   # jvp evaluation doesn't crash
-  #   api.jvp(lambda params: loss(params, inputs, targets), (params,), (params,))
-
-  #   # gradient evaluation doesn't crash
-  #   api.grad(loss)(params, inputs, targets)
-
-  #   # gradient check passes
-  #   jtu.check_grads(loss, (params, inputs, targets), order=1)
-
-  #   # we can vmap to batch things
-  #   batch_size = 7
-  #   batched_inputs = r.randn(batch_size, length, n_in)
-  #   batched_targets = r.randn(batch_size, length, n_out)
-  #   batched_loss = api.vmap(lambda x, y: loss(params, x, y))
-  #   losses = batched_loss(batched_inputs, batched_targets)
-  #   expected = onp.stack(list(map(lambda x, y: loss(params, x, y),
-  #                                 batched_inputs, batched_targets)))
-  #   self.assertAllClose(losses, expected, check_dtypes=False)
+    #  TODO
+    # # we can vmap to batch things
+    # batch_size = 7
+    # batched_inputs = r.randn(batch_size, length, n_in)
+    # batched_targets = r.randn(batch_size, length, n_out)
+    # batched_loss = api.vmap(lambda x, y: loss(params, x, y))
+    # losses = batched_loss(batched_inputs, batched_targets)
+    # expected = onp.stack(list(map(lambda x, y: loss(params, x, y),
+    #                               batched_inputs, batched_targets)))
+    # self.assertAllClose(losses, expected, check_dtypes=False)
 
   # def testIssue711(self):
   #   # Tests reverse-mode differentiation through a scan for which the scanned

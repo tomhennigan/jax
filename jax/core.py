@@ -41,11 +41,11 @@ map = safe_map
 
 class Jaxpr(object):
   def __init__(self, constvars, freevars, invars, outvars, eqns):
-    self.constvars = tuple(constvars)
-    self.freevars = tuple(freevars)
-    self.invars = tuple(invars)
-    self.outvars = tuple(outvars)
-    self.eqns = tuple(eqns)
+    self.constvars = list(constvars)
+    self.freevars = list(freevars)
+    self.invars = list(invars)
+    self.outvars = list(outvars)
+    self.eqns = list(eqns)
 
   def __str__(self):
     return str(pp_jaxpr(self))
@@ -65,9 +65,9 @@ class TypedJaxpr(object):
     assert not jaxpr.freevars
 
     self.jaxpr = jaxpr
-    self.literals = tuple(literals)
-    self.in_avals = tuple(in_avals)
-    self.out_avals = tuple(out_avals)
+    self.literals = list(literals)
+    self.in_avals = list(in_avals)
+    self.out_avals = list(out_avals)
 
   def __iter__(self):
     return iter((self.jaxpr, self.literals, self.in_avals, self.out_avals))
@@ -83,10 +83,15 @@ class TypedJaxpr(object):
     return TypedJaxpr(self.jaxpr.copy(), self.literals[:], self.in_avals[:],
                       self.out_avals[:])
 
+def typecheck(aval, x):
+  try:
+    return aval == lattice_join(aval, get_aval(x))
+  except TypeError:
+    return False
 
 @curry
 def jaxpr_as_fun(typed_jaxpr, *args):
-  invars = typed_jaxpr.jaxpr.invars
+  assert all(map(typecheck, typed_jaxpr.in_avals, args))
   return eval_jaxpr(typed_jaxpr.jaxpr, typed_jaxpr.literals, (), *args)
 
 

@@ -4019,8 +4019,7 @@ batching.primitive_batchers[stop_gradient_p] = _stop_gradient_batch_rule
 
 ### util
 
-def _ndim(x):
-  return x.ndim
+_ndim = onp.ndim
 
 
 def _dilate_shape(shape, dilation):

@@ -483,20 +483,22 @@ def partial_eval_jaxpr(jaxpr, unknowns, instantiate):
            for aval, uk in zip(jaxpr.in_avals, unknowns)]
   jaxpr_1, out_pvals, consts_1 = trace_to_jaxpr(lu.wrap_init(fun), pvals, instantiate=True)
   (out_pvs_2, jaxpr_2, num_res), = cell
+  assert len(jaxpr_2.constvars) == num_res
 
   #   jaxpr :: a -> b
   # jaxpr_1 :: a1 -> [b1, res]
   # jaxpr_2 :: res | a2 -> b2
-  jaxpr_2 = closure_convert_jaxpr(jaxpr_2)
-  jaxpr_2.invars= jaxpr_2.invars[num_res:] + jaxpr_2.invars[:num_res]
   # jaxpr_2 :: [a2, res] -> b2
+  jaxpr_2 = closure_convert_jaxpr(jaxpr_2)
+  jaxpr_2.invars = jaxpr_2.invars[num_res:] + jaxpr_2.invars[:num_res]
   uk_out = [pv is not None for pv in out_pvs_2]
 
   in_avals_1, in_avals_2 = unzip2(map(_split_aval, unknowns, jaxpr.in_avals))
   out_avals_1, out_avals_2 = unzip2(map(_split_aval, uk_out, jaxpr.out_avals))
-  # out_avals_1 and in_avals_2 needs the residuals added
+  # out_avals_1 and in_avals_2 need the residuals added
   out_pvs, _ = unzip2(out_pvals)
   res_avals = out_pvs[len(jaxpr.out_avals):]
+  assert len(res_avals) == num_res
   out_avals_1 = out_avals_1 + res_avals
   in_avals_2 = in_avals_2 + res_avals
 

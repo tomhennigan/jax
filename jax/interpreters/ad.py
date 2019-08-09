@@ -187,7 +187,8 @@ def backward_pass(jaxpr, consts, freevar_vals, args, cotangents_in):
   cotangents_out = map(read_cotangent, jaxpr.invars)
   return freevar_cts, cotangents_out
 
-class UndefinedPrimal(object): pass
+class UndefinedPrimal(object):
+  def __repr__(self): return  '_'
 undefined_primal = UndefinedPrimal()
 register_pytree_node(UndefinedPrimal,
                      lambda z: ((), None),
@@ -501,9 +502,9 @@ def strip_zeros(unit, pack, isnonzero, x):
     return pack(map(partial(strip_zeros, unit, pack), isnonzero, x))
 
 def jvp_jaxpr(jaxpr, nonzeros, instantiate):
+  assert len(jaxpr.in_avals) == len(nonzeros)
   f = wrap_init(core.jaxpr_as_fun(jaxpr))
-  f_jvp, out_nonzeros = f_jvp_traceable(jvp(f, instantiate=instantiate),
-                                        nonzeros, len(nonzeros))
+  f_jvp, out_nonzeros = f_jvp_traceable(jvp(f, instantiate=instantiate), nonzeros)
   tangent_avals = [aval for aval, nz in zip(jaxpr.in_avals, nonzeros) if nz]
   avals_in = list(it.chain(jaxpr.in_avals, tangent_avals))
   pvals = [pe.PartialVal((aval, core.unit)) for aval in avals_in]
@@ -513,14 +514,15 @@ def jvp_jaxpr(jaxpr, nonzeros, instantiate):
   return jaxpr_out, out_nonzeros()
 
 @transformation_with_aux
-def f_jvp_traceable(nonzeros, num_primals, *primals_and_tangents):
-  primals = list(primals_and_tangents[:num_primals])
-  nonzero_tangents = iter(primals_and_tangents[num_primals:])
+def f_jvp_traceable(nonzeros, *primals_and_nztangents):
+  num_primals = len(nonzeros)
+  primals = list(primals_and_nztangents[:num_primals])
+  nonzero_tangents = iter(primals_and_nztangents[num_primals:])
   tangents = [next(nonzero_tangents) if nz else zero for nz in nonzeros]
   primals_out, tangents_out = yield (primals, tangents), {}
   out_nonzeros = [t is not zero for t in tangents_out]
-  nonzero_tangents_out = [t for t in tangents if t is not zero]
-  yield list(primals_out) + tangents_out, out_nonzeros
+  nonzero_tangents_out = [t for t in tangents_out if t is not zero]
+  yield list(primals_out) + nonzero_tangents_out, out_nonzeros
 
 def rearrange_binders(jaxpr, primals_in, tangents_in, primals_out, tangents_out):
   jaxpr = jaxpr.copy()
