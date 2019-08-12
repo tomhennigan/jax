@@ -546,14 +546,14 @@ def scan(f, init, xs):
                           carry_avals + y_avals)
   out = scan_p.bind(*itertools.chain(consts, in_flat),
                     forward=True, length=length, jaxpr=jaxpr,
-                    num_consts=len(consts), num_carry=num_carry, num_lin=0)
+                    num_consts=len(consts), num_carry=num_carry,
+                    linear=(False,) * (len(consts) + len(in_flat)))
   return tree_unflatten(out_tree(), out)
 
 def _scan_impl(*args, **kwargs):
   forward, length = kwargs.pop("forward"), kwargs.pop("length")
   num_consts, num_carry = kwargs.pop("num_consts"), kwargs.pop("num_carry")
-  num_lin = kwargs.pop("num_lin")
-  jaxpr = kwargs.pop("jaxpr")
+  jaxpr, _ = kwargs.pop("jaxpr"), kwargs.pop("linear")
   assert not kwargs
   consts, init, xs = split_list(args, [num_consts, num_carry])
   _, _, x_avals = split_list(jaxpr.in_avals, [num_consts, num_carry])
@@ -590,8 +590,7 @@ def _update_array(i, aval, xs, x):
     return lax.dynamic_update_index_in_dim(xs, x, i, 0)
 
 def _scan_jvp(primals, tangents, forward, length, jaxpr, num_consts, num_carry,
-              num_lin):
-  # TODO(mattjj, dougalm): we ignore num_lin here, not tracking some linearity
+              linear):
   num_xs = len(jaxpr.in_avals) - num_carry - num_consts
   num_ys = len(jaxpr.out_avals) - num_carry
   nonzeros = [t is not ad_util.zero for t in tangents]
@@ -621,11 +620,16 @@ def _scan_jvp(primals, tangents, forward, length, jaxpr, num_consts, num_carry,
       [num_consts, num_carry, num_xs], [len(consts_dot), len(init_dot), len(xs_dot)],
       [num_carry, num_ys], [len(init_dot), sum(nonzeros_out) - len(init_dot)])
 
+  consts_linear, init_linear, xs_linear = split_list(linear, [num_consts, num_carry])
+  jaxpr_jvp_linear = (consts_linear + [True] * len(consts_dot)
+                      + init_linear + [True] * len(init_dot)
+                      + xs_linear + [True] * len(xs_dot))
+
   out_flat = scan_p.bind(
       *(consts + consts_dot + init + init_dot + xs + xs_dot),
       forward=forward, length=length, jaxpr=jaxpr_jvp_rearranged,
       num_consts=num_consts+len(consts_dot), num_carry=num_carry+len(init_dot),
-      num_lin=len(xs_dot))
+      linear=jaxpr_jvp_linear)
 
   carry, carry_dot, ys, ys_dot = split_list(out_flat, [num_carry, len(init_dot), num_ys])
   primals_out = carry + ys
@@ -639,13 +643,12 @@ def _prune_zeros(ts):
 def _scan_partial_eval(trace, *tracers, **kwargs):
   forward, length = kwargs.pop("forward"), kwargs.pop("length")
   num_consts, num_carry = kwargs.pop("num_consts"), kwargs.pop("num_carry")
-  num_lin = kwargs.pop("num_lin")
-  jaxpr = kwargs.pop("jaxpr")
+  jaxpr, linear = kwargs.pop("jaxpr"), kwargs.pop("linear")
   assert not kwargs
   num_xs = len(jaxpr.in_avals) - num_carry - num_consts
   num_ys = len(jaxpr.out_avals) - num_carry
 
-  unknowns = [t.pval[0] is not None for t in tracers]
+  unknowns = original_unknowns = [t.pval[0] is not None for t in tracers]
   const_uk, init_uk, xs_uk = split_list(unknowns, [num_consts, num_carry])
 
   carry_uk = init_uk
@@ -670,18 +673,21 @@ def _scan_partial_eval(trace, *tracers, **kwargs):
   out_avals = carry_avals + ys_avals
   out_pvs = [aval if uk else None for aval, uk in zip(out_avals, out_uk)]
 
+  linear_1 = [lin or uk for lin in linear]
   out_flat = scan_p.bind(
       *in_consts, forward=forward, length=length, jaxpr=jaxpr_1,
-      num_consts=num_consts, num_carry=num_carry, num_lin=num_lin)
+      num_consts=num_consts, num_carry=num_carry, linear=linear_1)
   out_carry, ys, residuals = split_list(out_flat, [num_carry, num_ys])
   out_consts = out_carry + ys
   residual_tracers = map(trace.new_instantiated_const, residuals)
   out_tracers = [pe.JaxprTracer(trace, pe.PartialVal((pv, const)), None)
                  for pv, const in zip(out_pvs, out_consts)]
+  linear_2 = ([lin or not uk for uk, lin in zip(unknowns, linear)]
+              + [False] * len(residual_tracers))
   eqn = pe.new_jaxpr_eqn(new_tracers + residual_tracers, out_tracers, scan_p,
                          (), dict(forward=forward, length=length, jaxpr=jaxpr_2,
                                   num_consts=num_consts, num_carry=num_carry,
-                                  num_lin=num_lin))
+                                  linear=linear_2))
   for t in out_tracers: t.recipe = eqn
   return out_tracers
 
@@ -694,12 +700,18 @@ def _promote_aval_rank(sz, aval):
 def _scan_transpose(cts, *args, **kwargs):
   forward, length = kwargs.pop("forward"), kwargs.pop("length")
   num_consts, num_carry = kwargs.pop("num_consts"), kwargs.pop("num_carry")
-  num_lin = kwargs.pop("num_lin")
-  jaxpr = kwargs.pop("jaxpr")
+  jaxpr, linear = kwargs.pop("jaxpr"), kwargs.pop("linear")
   assert not kwargs
   num_ys = len(jaxpr.out_avals) - num_carry
 
+  # we can only transpose scans for which the nonlinear values appear in xs
+  consts_lin, init_lin, xs_lin = split_list(linear, [num_consts, num_carry])
+  num_lin = sum(xs_lin)
+  if not all(consts_lin) or not all(init_lin) or not all(xs_lin[:num_lin]):
+    raise NotImplementedError
+
   consts, init, xs, res = split_list(args, [num_consts, num_carry, num_lin])
+  assert not any(r is ad.undefined_primal for r in res)
 
   carry_avals, y_avals = split_list(jaxpr.out_avals, [num_carry])
   ys_avals = map(partial(_promote_aval_rank, length), y_avals)
@@ -711,32 +723,34 @@ def _scan_transpose(cts, *args, **kwargs):
   #       jaxpr :: [T d] -> [T c] -> [T a, res] -> ([T c], [T b])
   # jaxpr_trans :: [] -> [CT d, CT c] -> [CT b, res] -> ([CT d, CT c], [CT a])
   jaxpr_trans = _transpose_jaxpr2(num_consts, len(res), jaxpr)
+  linear_trans = ([True] * (len(ct_consts) + len(ct_carry) + len(ct_ys))
+                  + [False] * len(res))
 
   outs = scan_p.bind(
       *(ct_consts + ct_carry + ct_ys + res), forward=not forward, length=length,
       jaxpr=jaxpr_trans, num_consts=0, num_carry=num_consts+num_carry,
-      num_lin=num_lin)
+      linear=linear_trans)
   ct_consts, ct_init, ct_xs = split_list(outs, [num_consts, num_carry])
   return ct_consts + ct_init + ct_xs + [None] * len(res)
 
-# transpose_jaxpr :: Int -> ([a, res] -> b) -> ([CT b, res] -> CT a)
-def _transpose_jaxpr(num_res, jaxpr):
-  num_lin = len(jaxpr.in_avals) - num_res
-  num_out = len(jaxpr.out_avals)
+# # transpose_jaxpr :: Int -> ([a, res] -> b) -> ([CT b, res] -> CT a)
+# def _transpose_jaxpr(num_res, jaxpr):
+#   num_lin = len(jaxpr.in_avals) - num_res
+#   num_out = len(jaxpr.out_avals)
 
-  @lu.wrap_init
-  def transposed(*bbar_res):
-    b_bar, res = bbar_res[:num_out], bbar_res[num_out:]
-    primals = (ad.undefined_primal,) * num_lin + res
-    _, abar_res = ad.backward_pass(jaxpr.jaxpr, jaxpr.literals, (), primals, b_bar)
-    return map(ad.instantiate_zeros_aval, jaxpr.in_avals[:num_lin], abar_res[:num_lin])
-  return _make_typed_jaxpr(transposed, jaxpr.out_avals + jaxpr.in_avals[num_lin:])
+#   @lu.wrap_init
+#   def transposed(*bbar_res):
+#     b_bar, res = bbar_res[:num_out], bbar_res[num_out:]
+#     primals = (ad.undefined_primal,) * num_lin + res
+#     _, abar_res = ad.backward_pass(jaxpr.jaxpr, jaxpr.literals, (), primals, b_bar)
+#     return map(ad.instantiate_zeros_aval, jaxpr.in_avals[:num_lin], abar_res[:num_lin])
+#   return _make_typed_jaxpr(transposed, jaxpr.out_avals + jaxpr.in_avals[num_lin:])
 
 # transpose_jaxpr2 :: ([c, a, res] -> b) -> ([CT c, CT b, res] -> [CT c, CT a]
 def _transpose_jaxpr2(num_c, num_res, jaxpr):
   num_a = len(jaxpr.in_avals) - num_c - num_res
-  num_b = len(jaxpr.out_avals)
   c_avals, a_avals, res_avals = split_list(jaxpr.in_avals, [num_c, num_a])
+  num_b = len(jaxpr.out_avals)
   b_avals = list(jaxpr.out_avals)
 
   @lu.wrap_init
@@ -851,9 +865,9 @@ def _scan_batching_rule(batched_args, batch_dims, forward, length, jaxpr):
 def scan_bind(*args, **kwargs):
   forward, length = kwargs.pop("forward"), kwargs.pop("length")
   num_consts, num_carry = kwargs.pop("num_consts"), kwargs.pop("num_carry")
-  num_lin = kwargs.pop("num_lin")
-  jaxpr = kwargs.pop("jaxpr")
+  jaxpr, linear = kwargs.pop("jaxpr"), kwargs.pop("linear")
   assert not kwargs
+  assert len(linear) == len(args)
 
   # check that args match input types
   consts, init, xs = split_list(args, [num_consts, num_carry])
@@ -867,13 +881,16 @@ def scan_bind(*args, **kwargs):
   carry_avals, _ = split_list(jaxpr.out_avals, [num_carry])
   assert init_avals == carry_avals
 
+  # check that the data flow is sensible
+  core.check_jaxpr(jaxpr.jaxpr)
+
   return core.Primitive.bind(scan_p, *args, forward=forward, length=length,
                              jaxpr=jaxpr, num_consts=num_consts,
-                             num_carry=num_carry, num_lin=num_lin)
+                             num_carry=num_carry, linear=linear)
 
 scan_p = core.Primitive("scan")
 scan_p.multiple_results = True
-# scan_p.def_custom_bind(scan_bind)
+scan_p.def_custom_bind(scan_bind)
 scan_p.def_impl(_scan_impl)
 ad.primitive_jvps[scan_p] = _scan_jvp
 ad.primitive_transposes[scan_p] = _scan_transpose

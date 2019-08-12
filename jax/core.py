@@ -91,7 +91,7 @@ def typecheck(aval, x):
 
 @curry
 def jaxpr_as_fun(typed_jaxpr, *args):
-  assert all(map(typecheck, typed_jaxpr.in_avals, args))
+  # assert all(map(typecheck, typed_jaxpr.in_avals, args))  # TODO ensure shaped
   return eval_jaxpr(typed_jaxpr.jaxpr, typed_jaxpr.literals, (), *args)
 
 

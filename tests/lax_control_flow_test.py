@@ -662,7 +662,7 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     api.grad(loss)(params, inputs, targets)
 
     # gradient check passes
-    jtu.check_grads(loss, (params, inputs, targets), order=1)
+    jtu.check_grads(loss, (params, inputs, targets), order=2)  # TODO 2
 
     #  TODO
     # # we can vmap to batch things
