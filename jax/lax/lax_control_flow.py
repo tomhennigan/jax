@@ -664,6 +664,8 @@ def _scan_partial_eval(trace, *tracers, **kwargs):
   else:
     raise FixedPointError
 
+  import ipdb; ipdb.set_trace()
+
   in_consts = [core.unit if uk else t.pval[1] for uk, t in zip(unknowns, tracers)]
   new_tracers = [trace.instantiate_const(t) if uk else trace.new_instantiated_literal(core.unit)
                  for uk, t in zip(unknowns, tracers)]
@@ -726,6 +728,7 @@ def _scan_transpose(cts, *args, **kwargs):
   linear_trans = ([True] * (len(ct_consts) + len(ct_carry) + len(ct_ys))
                   + [False] * len(res))
 
+  import ipdb; ipdb.set_trace()
   outs = scan_p.bind(
       *(ct_consts + ct_carry + ct_ys + res), forward=not forward, length=length,
       jaxpr=jaxpr_trans, num_consts=0, num_carry=num_consts+num_carry,
@@ -879,7 +882,7 @@ def scan_bind(*args, **kwargs):
 
   # check that output carry type matches input carry type
   carry_avals, _ = split_list(jaxpr.out_avals, [num_carry])
-  assert init_avals == carry_avals
+  # assert init_avals == carry_avals  # TODO carry can be more specific than init
 
   # check that the data flow is sensible
   core.check_jaxpr(jaxpr.jaxpr)
