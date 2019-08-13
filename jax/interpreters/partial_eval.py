@@ -475,7 +475,6 @@ def partial_eval_jaxpr(jaxpr, unknowns, instantiate):
     pvals = [PartialVal((aval, unit)) if uk else PartialVal((None, val))
              for aval, val, uk in zip(jaxpr.in_avals, vals, unknowns)]
     jaxpr_2, out_pvals_2, consts_2 = trace_to_jaxpr(f, pvals, instantiate=instantiate)
-    import ipdb; ipdb.set_trace()
     out_pvs_2, out_consts_2 = unzip2(out_pvals_2)
     cell.append((out_pvs_2, jaxpr_2, len(consts_2)))
     return out_consts_2 + consts_2
@@ -485,8 +484,6 @@ def partial_eval_jaxpr(jaxpr, unknowns, instantiate):
   jaxpr_1, out_pvals, consts_1 = trace_to_jaxpr(lu.wrap_init(fun), pvals, instantiate=True)
   (out_pvs_2, jaxpr_2, num_res), = cell
   assert len(jaxpr_2.constvars) == num_res
-
-  import ipdb; ipdb.set_trace()
 
   #   jaxpr :: a -> b
   # jaxpr_1 :: a1 -> [b1, res]

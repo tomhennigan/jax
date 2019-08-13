@@ -560,7 +560,7 @@ def _scan_impl(*args, **kwargs):
   _, y_avals = split_list(jaxpr.out_avals, [num_carry])
 
   def body_fun(i, vals):
-    idx = i if forward else length - i - 1
+    i = i if forward else length - i - 1
     carry, ys = split_list(vals, [num_carry])
     x = map(partial(_index_array, i), x_avals, xs)
     out_flat = core.jaxpr_as_fun(jaxpr)(*(consts + carry + x))
@@ -664,8 +664,6 @@ def _scan_partial_eval(trace, *tracers, **kwargs):
   else:
     raise FixedPointError
 
-  import ipdb; ipdb.set_trace()
-
   in_consts = [core.unit if uk else t.pval[1] for uk, t in zip(unknowns, tracers)]
   new_tracers = [trace.instantiate_const(t) if uk else trace.new_instantiated_literal(core.unit)
                  for uk, t in zip(unknowns, tracers)]
@@ -728,7 +726,6 @@ def _scan_transpose(cts, *args, **kwargs):
   linear_trans = ([True] * (len(ct_consts) + len(ct_carry) + len(ct_ys))
                   + [False] * len(res))
 
-  import ipdb; ipdb.set_trace()
   outs = scan_p.bind(
       *(ct_consts + ct_carry + ct_ys + res), forward=not forward, length=length,
       jaxpr=jaxpr_trans, num_consts=0, num_carry=num_consts+num_carry,
