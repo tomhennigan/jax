@@ -778,7 +778,7 @@ def _scan_batching_rule(args, dims, forward, length, jaxpr, num_consts,
   num_ys = len(jaxpr.out_avals) - num_carry
   size, = {x.shape[d] for x, d in zip(args, dims) if d is not batching.not_mapped}
   orig_batched = [d is not batching.not_mapped for d in dims]
-  const_batched, init_batched, xs_bdims = split_list(orig_batched, [num_consts, num_carry])
+  const_batched, init_batched, xs_batched = split_list(orig_batched, [num_consts, num_carry])
 
   carry_batched = init_batched
   for _ in range(1000):
@@ -809,7 +809,7 @@ def _scan_batching_rule(args, dims, forward, length, jaxpr, num_consts,
                      num_consts=num_consts, num_carry=num_carry, linear=linear)
   carry_bdims = [0 if b else batching.not_mapped for b in carry_batched]
   ys_bdims = [1 if b else batching.not_mapped for b in ys_batched]
-  return outs, carry_bdims + out_bdims
+  return outs, carry_bdims + ys_bdims
 
   assert False, "update it"
   consts, init, xs = batched_args

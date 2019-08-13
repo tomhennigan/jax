@@ -377,30 +377,17 @@ def _broadcast2(size, axis, x, aval):
     else:
       return x.broadcast((size,))  # should be a JAX arraylike
 
-def _promote_aval_rank(n, batched, aval):
-  assert False, "update it"
-  assert isinstance(aval, core.AbstractValue)
-  if type(aval) is AbstractTuple:
-    t = type(batched)
-    if t is tuple:
-      return AbstractTuple(map(partial(_promote_aval_rank, n), batched, aval))
-    elif t is bool:
-      if batched:
-        return AbstractTuple(map(partial(_promote_aval_rank, n, batched), aval))
-      else:
-        return aval
-    else:
-      raise TypeError(t)
+def _promote_aval_rank(sz, aval):
+  if aval is core.abstract_unit:
+    return core.abstract_unit
   else:
-    if batched:
-      return ShapedArray((n,) + aval.shape, aval.dtype)
-    else:
-      return aval
+    return ShapedArray((sz,) + aval.shape, aval.dtype)
 
 def batch_jaxpr(jaxpr, size, batched, instantiate):
   f = wrap_init(core.jaxpr_as_fun(jaxpr))
   f, batched_out = batched_traceable(f, size, batched, instantiate)
-  avals_in = map(partial(_promote_aval_rank, size), batched, jaxpr.in_avals)
+  avals_in = [_promote_aval_rank(size, a) if b else a
+              for a, b in zip(jaxpr.in_avals, batched)]
   in_pvals = [pe.PartialVal((aval, core.unit)) for aval in avals_in]
   jaxpr_out, pvals_out, consts_out = pe.trace_to_jaxpr(f, in_pvals, instantiate=True)
   avals_out, _ = unzip2(pvals_out)
@@ -421,7 +408,7 @@ def batched_traceable(size, batched, instantiate, *vals):
               for x, d, inst in zip(out_vals, out_dims, instantiate)]
   out_batched = [d is not not_mapped or inst
                  for d, inst in zip(out_dims, instantiate)]
-  return out_vals, out_batched
+  yield out_vals, out_batched
 
   assert False, "update it"
   in_dims = bools_to_bdims(0, is_batched)
