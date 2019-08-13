@@ -675,16 +675,15 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     # gradient check passes
     jtu.check_grads(loss, (params, inputs, targets), order=2)
 
-    #  TODO
-    # # we can vmap to batch things
-    # batch_size = 7
-    # batched_inputs = r.randn(batch_size, length, n_in)
-    # batched_targets = r.randn(batch_size, length, n_out)
-    # batched_loss = api.vmap(lambda x, y: loss(params, x, y))
-    # losses = batched_loss(batched_inputs, batched_targets)
-    # expected = onp.stack(list(map(lambda x, y: loss(params, x, y),
-    #                               batched_inputs, batched_targets)))
-    # self.assertAllClose(losses, expected, check_dtypes=False)
+    # we can vmap to batch things
+    batch_size = 7
+    batched_inputs = r.randn(batch_size, length, n_in)
+    batched_targets = r.randn(batch_size, length, n_out)
+    batched_loss = api.vmap(lambda x, y: loss(params, x, y))
+    losses = batched_loss(batched_inputs, batched_targets)
+    expected = onp.stack(list(map(lambda x, y: loss(params, x, y),
+                                  batched_inputs, batched_targets)))
+    self.assertAllClose(losses, expected, check_dtypes=False)
 
   def testIssue711(self):
     # Tests reverse-mode differentiation through a scan for which the scanned
@@ -742,102 +741,102 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     jtu.check_grads(lambda c, as_: lax.scan(f, c, as_), (c, as_),
                     modes=["rev"], order=2)
 
-  # @parameterized.named_parameters(
-  #     {"testcase_name": "_jit_scan={}_jit_f={}_in_axes={}".format(
-  #         jit_scan, jit_f, in_axes),
-  #      "jit_scan": jit_scan, "jit_f": jit_f, "in_axes": in_axes}
-  #     for jit_scan in [False, True]
-  #     for jit_f in [False, True]
-  #     for in_axes in itertools.product([None, 0, 1], [None, 0, 1, 2])
-  #     if in_axes != (None, None))
-  # def testScanVmap(self, jit_scan, jit_f, in_axes):
-  #   d = np.array([1., 2.])
-  #   def f(c, a):
-  #     assert a.shape == (3,)
-  #     assert c.shape == (4,)
-  #     b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
-  #     c = np.sin(c * b)
-  #     assert b.shape == ()
-  #     return c, b
+  @parameterized.named_parameters(
+      {"testcase_name": "_jit_scan={}_jit_f={}_in_axes={}".format(
+          jit_scan, jit_f, in_axes),
+       "jit_scan": jit_scan, "jit_f": jit_f, "in_axes": in_axes}
+      for jit_scan in [False, True]
+      for jit_f in [False, True]
+      for in_axes in itertools.product([None, 0, 1], [None, 0, 1, 2])
+      if in_axes != (None, None))
+  def testScanVmap(self, jit_scan, jit_f, in_axes):
+    d = np.array([1., 2.])
+    def f(c, a):
+      assert a.shape == (3,)
+      assert c.shape == (4,)
+      b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
+      c = np.sin(c * b)
+      assert b.shape == ()
+      return c, b
 
-  #   if jit_f:
-  #     f = api.jit(f)
-  #   if jit_scan:
-  #     scan = api.jit(lax.scan, (0,))
-  #   else:
-  #     scan = lax.scan
+    if jit_f:
+      f = api.jit(f)
+    if jit_scan:
+      scan = api.jit(lax.scan, (0,))
+    else:
+      scan = lax.scan
 
-  #   as_shape = [5, 3]
-  #   c_shape = [4]
+    as_shape = [5, 3]
+    c_shape = [4]
 
-  #   c_bdim, as_bdim = in_axes
-  #   if c_bdim is not None:
-  #     c_shape.insert(c_bdim, 7)
-  #   if as_bdim is not None:
-  #     as_shape.insert(as_bdim, 7)
+    c_bdim, as_bdim = in_axes
+    if c_bdim is not None:
+      c_shape.insert(c_bdim, 7)
+    if as_bdim is not None:
+      as_shape.insert(as_bdim, 7)
 
-  #   r = onp.random.RandomState(0)
-  #   as_ = r.randn(*as_shape)
-  #   c = r.randn(*c_shape)
+    r = onp.random.RandomState(0)
+    as_ = r.randn(*as_shape)
+    c = r.randn(*c_shape)
 
-  #   ans = api.vmap(lambda c, as_:                scan(f, c, as_), in_axes)(c, as_)
-  #   expected = api.vmap(lambda c, as_: scan_reference(f, c, as_), in_axes)(c, as_)
-  #   self.assertAllClose(ans, expected, check_dtypes=False)
+    ans = api.vmap(lambda c, as_:                scan(f, c, as_), in_axes)(c, as_)
+    expected = api.vmap(lambda c, as_: scan_reference(f, c, as_), in_axes)(c, as_)
+    self.assertAllClose(ans, expected, check_dtypes=False)
 
-  # def testScanVmapTuples(self):
-  #   def f(c, a):
-  #     a1, a2 = a
-  #     c1, c2 = c
-  #     b = np.sum(np.cos(a1)) * np.sum(np.tan(c2 * a2))
-  #     c = c1 * np.sin(np.sum(a1 * a2)), c2 * np.cos(np.sum(a1))
-  #     return c, b
+  def testScanVmapTuples(self):
+    def f(c, a):
+      a1, a2 = a
+      c1, c2 = c
+      b = np.sum(np.cos(a1)) * np.sum(np.tan(c2 * a2))
+      c = c1 * np.sin(np.sum(a1 * a2)), c2 * np.cos(np.sum(a1))
+      return c, b
 
-  #   in_axes = (0, (1, 2))
+    in_axes = (0, (1, 2))
 
-  #   r = onp.random.RandomState(0)
-  #   as_ = (r.randn(3, 7), r.randn(3, 4, 7))
-  #   c = (r.randn(7, 2), r.randn(7))
+    r = onp.random.RandomState(0)
+    as_ = (r.randn(3, 7), r.randn(3, 4, 7))
+    c = (r.randn(7, 2), r.randn(7))
 
-  #   expected_c_out, expected_bs = [], []
-  #   for i in range(7):
-  #     c_out, bs = lax.scan(f, (c[0][i], c[1][i]), (as_[0][:,i], as_[1][:,:,i]))
-  #     expected_c_out.append(c_out)
-  #     expected_bs.append(bs)
-  #   expected_c_out_0, expected_c_out_1 = unzip2(expected_c_out)
-  #   expected_c_out = (np.stack(expected_c_out_0), np.stack(expected_c_out_1))
-  #   expected_bs = np.stack(expected_bs)
-  #   expected = expected_c_out, expected_bs
+    expected_c_out, expected_bs = [], []
+    for i in range(7):
+      c_out, bs = lax.scan(f, (c[0][i], c[1][i]), (as_[0][:,i], as_[1][:,:,i]))
+      expected_c_out.append(c_out)
+      expected_bs.append(bs)
+    expected_c_out_0, expected_c_out_1 = unzip2(expected_c_out)
+    expected_c_out = (np.stack(expected_c_out_0), np.stack(expected_c_out_1))
+    expected_bs = np.stack(expected_bs)
+    expected = expected_c_out, expected_bs
 
-  #   ans = api.vmap(lambda c, as_:            lax.scan(f, c, as_), in_axes)(c, as_)
-  #   self.assertAllClose(ans, expected, check_dtypes=False)
+    ans = api.vmap(lambda c, as_:            lax.scan(f, c, as_), in_axes)(c, as_)
+    self.assertAllClose(ans, expected, check_dtypes=False)
 
-# #   # TODO(mattjj, dougalm): fix this test when skip_checks is False
-# #   def testIssue757(self):
-# #     # code from https://github.com/google/jax/issues/757
-# #     def fn(a):
-# #         return np.cos(a)
+#   # TODO(mattjj, dougalm): fix this test when skip_checks is False
+#   def testIssue757(self):
+#     # code from https://github.com/google/jax/issues/757
+#     def fn(a):
+#         return np.cos(a)
 
-# #     def loop(val):
-# #         iterations = 10
-# #         def apply_carry(x, i):
-# #             return api.grad(fn, argnums=(0,))(x)[0], i
+#     def loop(val):
+#         iterations = 10
+#         def apply_carry(x, i):
+#             return api.grad(fn, argnums=(0,))(x)[0], i
 
-# #         final_val, _ = lax.scan(
-# #             apply_carry,
-# #             val,
-# #             np.arange(iterations)
-# #         )
-# #         return final_val
+#         final_val, _ = lax.scan(
+#             apply_carry,
+#             val,
+#             np.arange(iterations)
+#         )
+#         return final_val
 
-# #     arg = 0.5
-# #     api.jit(api.jacfwd(loop, argnums=(0,)))(arg)  # doesn't crash
+#     arg = 0.5
+#     api.jit(api.jacfwd(loop, argnums=(0,)))(arg)  # doesn't crash
 
-# #   # TODO(mattjj): add a test for "the David Sussillo bug"
+#   # TODO(mattjj): add a test for "the David Sussillo bug"
 
-# #   def testIssue804(self):
-# #     num_devices = xla_bridge.device_count()
-# #     f = partial(lax.scan, lambda c, x: (c + lax.psum(x, "i") , c), 0.)
-# #     api.pmap(f, axis_name="i")(np.ones((num_devices, 4)))  # doesn't crash
+#   def testIssue804(self):
+#     num_devices = xla_bridge.device_count()
+#     f = partial(lax.scan, lambda c, x: (c + lax.psum(x, "i") , c), 0.)
+#     api.pmap(f, axis_name="i")(np.ones((num_devices, 4)))  # doesn't crash
 
 
 if __name__ == '__main__':

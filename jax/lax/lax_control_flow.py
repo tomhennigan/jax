@@ -772,58 +772,45 @@ def _make_typed_jaxpr(traceable, in_avals):
   out_avals, _ = unzip2(pvals_out)
   return core.TypedJaxpr(jaxpr, consts, in_avals, out_avals)
 
-_scan_newvar = pe.gensym('_scan')
 
-def _move_stuff_and_add_add(typed_jaxpr):
-  # jaxpr_lifted_trans :: res -> (CT c, CT b) -> (CT d, CT c, CT a)
-  # jaxpr_trans :: * -> (CT c, CT d) -> (CT b, res) -> ((CT c, CT d), CT a)
+def _scan_batching_rule(args, dims, forward, length, jaxpr, num_consts,
+                        num_carry, linear):
+  num_ys = len(jaxpr.out_avals) - num_carry
+  size, = {x.shape[d] for x, d in zip(args, dims) if d is not batching.not_mapped}
+  orig_batched = [d is not batching.not_mapped for d in dims]
+  const_batched, init_batched, xs_bdims = split_list(orig_batched, [num_consts, num_carry])
 
-  res_aval, (CTc_aval, CTb_aval) = typed_jaxpr.in_avals
-  CTd_aval, CTc_aval2, CTa_aval = typed_jaxpr.out_aval
-  assert CTc_aval == CTc_aval2
-  in_avals = (core.AbstractTuple(()), core.AbstractTuple((CTc_aval, CTd_aval)),
-              core.AbstractTuple((CTb_aval, res_aval)))
-  out_aval = core.AbstractTuple((core.AbstractTuple((CTc_aval, CTd_aval)),
-                                 CTa_aval))
+  carry_batched = init_batched
+  for _ in range(1000):
+    batched = const_batched + carry_batched + xs_batched
+    jaxpr_batched, batched_out = batching.batch_jaxpr(
+        jaxpr, size, batched, instantiate=carry_batched + [False] * num_ys)
+    carry_batched_out, ys_batched = batched_out[:num_carry], batched_out[num_carry:]
+    if carry_batched_out == carry_batched:
+      break
+    else:
+      carry_batched = carry_batched_out
+  else:
+    raise FixedPointError
 
-  jaxpr = typed_jaxpr.jaxpr.copy()
-  # assume the jaxpr isn't restructuring any inputs
-  assert not any(type(invar) is tuple for invar in jaxpr.invars)
+  consts, init, xs = split_list(args, [num_consts, num_carry])
+  consts_bdims, init_bdims, xs_bdims = split_list(dims, [num_consts, num_carry])
+  new_consts = [batching.moveaxis(x, d, 0) if d is not batching.not_mapped and d != 0
+                else x for x, d in zip(consts, consts_bdims)]
+  new_init = [batching.broadcast(x, size, 0) if now_batched and not was_batched
+              else batching.moveaxis(x, d, 0) if now_batched else x
+              for x, d, was_batched, now_batched in
+              zip(init, init_bdims, init_batched, carry_batched)]
+  new_xs = [batching.moveaxis(x, d, 1) if d is not batching.not_mapped and d != 1
+            else x for x, d in zip(xs, xs_bdims)]
+  new_args = new_consts + new_init + new_xs
 
-  # munge input side
-  CTc_in = _scan_newvar()
-  CTb_in = _scan_newvar()
-  CTd_in = _scan_newvar()
-  res_in, CTc_CTb_in = jaxpr.invars
-  jaxpr.invars = ((), (CTc_in, CTd_in), (CTb_in, res_in))
-  jaxpr.eqns = (
-      [pe._pack_eqn([CTc_in, CTb_in], CTc_CTb_in)] +
-      jaxpr.eqns)
+  outs = scan_p.bind(*new_args, forward=forward, length=length, jaxpr=jaxpr_batched,
+                     num_consts=num_consts, num_carry=num_carry, linear=linear)
+  carry_bdims = [0 if b else batching.not_mapped for b in carry_batched]
+  ys_bdims = [1 if b else batching.not_mapped for b in ys_batched]
+  return outs, carry_bdims + out_bdims
 
-  # munge output side
-  CTd_new = _scan_newvar()
-  CTd_sum = _scan_newvar()
-  CTc = _scan_newvar()
-  CTa = _scan_newvar()
-  partial_out = _scan_newvar()
-  outvar = _scan_newvar()
-  jaxpr.eqns = (
-      jaxpr.eqns +
-      [pe._unpack_eqn(jaxpr.outvar, [CTd_new, CTc, CTa]),
-       _add_any_eqn(CTd_sum, CTd_new, CTd_in),
-       pe._pack_eqn([CTc, CTd_sum], partial_out),
-       pe._pack_eqn([partial_out, CTa], outvar)])
-  jaxpr.outvar = outvar
-
-  # TODO(mattjj): add a check_typed_jaxpr and use it here
-  core.skip_checks or core.check_jaxpr(jaxpr)
-  return core.TypedJaxpr(jaxpr, typed_jaxpr.literals, in_avals, out_aval)
-
-def _add_any_eqn(tot, a, b):
-  return core.JaxprEqn([a, b], [tot], ad_util.add_jaxvals_p, (), False, False, {})
-
-
-def _scan_batching_rule(batched_args, batch_dims, forward, length, jaxpr):
   assert False, "update it"
   consts, init, xs = batched_args
   consts_bdim, init_bdim, xs_bdim = batch_dims

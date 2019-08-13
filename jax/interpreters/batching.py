@@ -238,6 +238,8 @@ defvectorized(xla.device_put_p)
 # method. To handle that case, the `broadcast` function uses a try/except.
 
 def broadcast(x, sz, axis):
+  if core.get_aval(x) is core.AbstractUnit:
+    return core.unit
   shape = list(onp.shape(x))
   shape.insert(axis, sz)
   if isinstance(x, onp.ndarray) or onp.isscalar(x):
@@ -247,12 +249,16 @@ def broadcast(x, sz, axis):
     return x.broadcast_in_dim(shape, broadcast_dims)
 
 def moveaxis(x, src, dst):
+  if core.get_aval(x) is core.AbstractUnit:
+    return core.unit
   src, dst = src % x.ndim, dst % x.ndim
   perm = [i for i in range(onp.ndim(x)) if i != src]
   perm.insert(dst, src)
   return x.transpose(perm)
 
 def matchaxis(sz, src, dst, x):
+  if core.get_aval(x) is core.AbstractUnit:
+    return core.unit
   if src == dst:
     return x
   elif type(src) == type(dst) == int:
@@ -263,10 +269,14 @@ def matchaxis(sz, src, dst, x):
     raise ValueError((src, dst))
 
 def bdim_at_front(x, bdim, size):
+  if core.get_aval(x) is core.AbstractUnit:
+    return core.unit
   if bdim is not_mapped:
     return broadcast(x, size, 0)
   else:
     return moveaxis(x, bdim, 0)
+
+# TODO delete everything below here
 
 
 # TODO(mattjj): try to de-duplicate utility functions with above
@@ -387,20 +397,32 @@ def _promote_aval_rank(n, batched, aval):
     else:
       return aval
 
-def batch_jaxpr(jaxpr, size, is_batched, instantiate):
-  assert False, "update it"
+def batch_jaxpr(jaxpr, size, batched, instantiate):
   f = wrap_init(core.jaxpr_as_fun(jaxpr))
-  f_batched, where_out_batched = batched_traceable(f, size, is_batched, instantiate)
-  in_avals = tuple(map(partial(_promote_aval_rank, size), is_batched, jaxpr.in_avals))
-  in_pvals = [pe.PartialVal((aval, core.unit)) for aval in in_avals]
-  jaxpr_out, pval_out, literals_out = pe.trace_to_jaxpr(
-      f_batched, in_pvals, instantiate=True)
-  out_aval, _ = pval_out
-  jaxpr_out = core.TypedJaxpr(jaxpr_out, literals_out, in_avals, out_aval)
-  return jaxpr_out, where_out_batched()
+  f, batched_out = batched_traceable(f, size, batched, instantiate)
+  avals_in = map(partial(_promote_aval_rank, size), batched, jaxpr.in_avals)
+  in_pvals = [pe.PartialVal((aval, core.unit)) for aval in avals_in]
+  jaxpr_out, pvals_out, consts_out = pe.trace_to_jaxpr(f, in_pvals, instantiate=True)
+  avals_out, _ = unzip2(pvals_out)
+  jaxpr_out = core.TypedJaxpr(jaxpr_out, consts_out, avals_in, avals_out)
+  return jaxpr_out, batched_out()
 
 @transformation_with_aux
-def batched_traceable(size, is_batched, instantiate, *vals):
+def batched_traceable(size, batched, instantiate, *vals):
+  in_dims = [0 if b else None for b in batched]
+  with new_master(BatchTrace) as master:
+    trace = BatchTrace(master, core.cur_sublevel())
+    ans = yield map(partial(BatchTracer, trace), vals, in_dims), {}
+    out_tracers = map(trace.full_raise, ans)
+    out_vals, out_dims = unzip2((t.val, t.batch_dim) for t in out_tracers)
+    del master, out_tracers
+  out_vals = [moveaxis(x, d, 0) if d is not not_mapped and d != 0
+              else broadcast(x, size, 0) if d is not_mapped and inst else x
+              for x, d, inst in zip(out_vals, out_dims, instantiate)]
+  out_batched = [d is not not_mapped or inst
+                 for d, inst in zip(out_dims, instantiate)]
+  return out_vals, out_batched
+
   assert False, "update it"
   in_dims = bools_to_bdims(0, is_batched)
   with new_master(BatchTrace) as master:
