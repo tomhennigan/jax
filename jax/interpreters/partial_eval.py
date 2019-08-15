@@ -303,7 +303,7 @@ def join_pvals(pval1, pval2):
     aval = core.lattice_join(pv1, pv2)
     return PartialVal((aval, unit))  # neither is known
   else:
-    assert False  # unreachable
+    raise TypeError((pval1, pval2))
 
 def as_abstract_val(pv):
   if isinstance(pv, AbstractValue):
