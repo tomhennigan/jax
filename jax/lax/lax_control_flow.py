@@ -173,7 +173,7 @@ def while_loop(cond_fun, body_fun, init_val):
   return tree_unflatten(out_tree(), outs)
 
 def _while_loop_impl(*args, **kwargs):
-  # TODO(mattjj): replace this with a call to apply_primitive
+  # TODO replace this with a call to apply_primitive
   cond_jaxpr, cond_nconsts = kwargs.pop("cond_jaxpr"), kwargs.pop("cond_nconsts")
   body_jaxpr, body_nconsts = kwargs.pop("body_jaxpr"), kwargs.pop("body_nconsts")
   assert not kwargs
@@ -304,36 +304,35 @@ batching.primitive_batchers[while_p] = _while_loop_batching_rule
 
 def cond(pred, true_operand, true_fun, false_operand, false_fun):
   def trace_jaxpr(fun, operand):
-    op_flat, in_tree = tree_flatten(operand)
-    fun_flat, out_tree = pytree_fun_to_flatjaxtuple_fun(lu.wrap_init(fun), (in_tree,))
-    jaxpr, pvout, consts = pe.trace_to_jaxpr(fun_flat, (_abstractify(op_flat),))
-    return op_flat, jaxpr, consts, pvout, out_tree
+    ops_flat, in_tree = tree_flatten((operand,))
+    in_avals, _ = map(_abstractify, ops_flat)
+    fun_flat, out_tree = flatten_fun_nokwargs(lu.wrap_init(fun), in_tree)
+    jaxpr = _make_typed_jaxpr(fun_flat, in_avals)
+    return ops_flat, jaxpr, out_tree()
 
-  true_data = trace_jaxpr(true_fun, true_operand)
-  true_op, true_jaxpr, true_consts, true_pval, true_tree = true_data
-  false_data = trace_jaxpr(false_fun, false_operand)
-  false_op, false_jaxpr, false_consts, false_pval, false_tree = false_data
+  true_ops, true_jaxpr, true_tree = trace_jaxpr(true_fun, true_operand)
+  false_ops, false_jaxpr, false_tree = trace_jaxpr(false_fun, false_operand)
 
-  if true_tree() != false_tree():
+  if true_tree != false_tree:
     msg = "true_fun and false_fun outputs must have identical structure"
     raise TypeError(msg)
 
   try:
-    joined_pval = pe.join_pvals(true_pval, false_pval)
+    joined_pvals = map(pe.join_pvals, true_pvals, false_pvals)
   except TypeError:
-    msg = "could not merge true_fun and false_fun output pvals: {} and {}."
-    raise TypeError(msg.format(true_pval, false_pval))
-  revis = _revise_cond_jaxpr(joined_pval, true_pval, true_jaxpr, true_consts)
-  true_jaxpr, true_consts = revis
-  revis = _revise_cond_jaxpr(joined_pval, false_pval, false_jaxpr, false_consts)
-  false_jaxpr, false_consts = revis
-  aval_out, _ = joined_pval
+    msg = ("could not merge true_fun and false_fun outputs to consistent type: "
+           "{} and {}".format(true_pvals, false_pvals))
+    raise TypeError(msg.format(true_pvals, false_pvals))
+  true_jaxpr, true_consts = _revise_cond_jaxpr(joined_pvals, true_pvals,
+                                               true_jaxpr, true_consts)
+  false_jaxpr, false_consts = _revise_cond_jaxpr(joined_pvals, false_pvals,
+                                                 false_jaxpr, false_consts)
 
-  out = cond_p.bind(pred, true_op, core.pack(true_consts), false_op,
-                    core.pack(false_consts), aval_out=aval_out,
+  out = cond_p.bind(*itertools.chain([pred], true_op, true_consts,
+                                     false_op, false_consts),
                     true_jaxpr=true_jaxpr, false_jaxpr=false_jaxpr)
   out = pe.merge_pvals(out, joined_pval)
-  return tree_unflatten(true_tree(), out)
+  return tree_unflatten(true_tree, out)
 
 def _revise_cond_jaxpr(new_pval, old_pval, jaxpr, consts):
   new_pv, new_const = new_pval

@@ -284,7 +284,6 @@ def merge_pvals(val, pval):
     raise TypeError(pv)
 
 def join_pvals(pval1, pval2):
-  assert False, "update it"
   pv1, const1 = pval1
   pv2, const2 = pval2
   if pv1 is None and pv2 is None:
@@ -304,26 +303,7 @@ def join_pvals(pval1, pval2):
     aval = core.lattice_join(pv1, pv2)
     return PartialVal((aval, unit))  # neither is known
   else:
-    # the pvals are tuples with some mixtures of known/unknown
-    assert isinstance(pv1, JaxprTracerTuple) or isinstance(pv2, JaxprTracerTuple)
-    def explode(pv, const):
-      if isinstance(pv, AbstractValue):
-        assert const == core.unit
-        const = [core.unit] * len(pv)
-      elif pv is None:
-        pv = [None] * len(const)
-      else:
-        assert isinstance(pv, JaxprTracerTuple)
-      return pv, const
-    pv1, const1 = explode(pv1, const1)
-    pv2, const2 = explode(pv2, const2)
-    pvals1, pvals2 = zip(pv1, const1), zip(pv2, const2)
-    join_pvs, join_consts = unzip2(map(join_pvals, pvals1, pvals2))
-    if all(isinstance(pv, AbstractValue) for pv in join_pvs):
-      assert all(const == core.unit for const in join_consts)
-      return PartialVal((AbstractTuple(join_pvs), core.unit))
-    else:
-      return PartialVal((JaxprTracerTuple(join_pvs), pack(join_consts)))
+    assert False  # unreachable
 
 def as_abstract_val(pv):
   if isinstance(pv, AbstractValue):
