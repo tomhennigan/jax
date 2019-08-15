@@ -147,7 +147,7 @@ def while_loop(cond_fun, body_fun, init_val):
     cond_out_avals = (cond_out_pv,)
   cond_const_avals, _ = unzip2(map(_abstractify, cond_consts))
   cond_jaxpr = core.TypedJaxpr(pe.closure_convert_jaxpr(cond_jaxpr),
-                               (), carry_avals + cond_const_avals, cond_out_avals)
+                               (), cond_const_avals + carry_avals, cond_out_avals)
   cond_nconsts = len(cond_consts)
 
   body_fun, out_tree = flatten_fun_nokwargs(lu.wrap_init(body_fun), in_tree)
@@ -163,7 +163,7 @@ def while_loop(cond_fun, body_fun, init_val):
     raise TypeError(msg.format(carry_avals, carry_avals_out))
   body_const_avals, _ = unzip2(map(_abstractify, body_consts))
   body_jaxpr = core.TypedJaxpr(pe.closure_convert_jaxpr(body_jaxpr),
-                               (), carry_avals + body_const_avals, carry_avals_out)
+                               (), body_const_avals + carry_avals, carry_avals_out)
   body_nconsts = len(body_consts)
 
   outs = while_p.bind(
@@ -171,21 +171,6 @@ def while_loop(cond_fun, body_fun, init_val):
       cond_nconsts=cond_nconsts, cond_jaxpr=cond_jaxpr,
       body_nconsts=body_nconsts, body_jaxpr=body_jaxpr)
   return tree_unflatten(out_tree(), outs)
-
-def _while_loop_impl(*args, **kwargs):
-  # TODO replace this with a call to apply_primitive
-  cond_jaxpr, cond_nconsts = kwargs.pop("cond_jaxpr"), kwargs.pop("cond_nconsts")
-  body_jaxpr, body_nconsts = kwargs.pop("body_jaxpr"), kwargs.pop("body_nconsts")
-  assert not kwargs
-  cond_consts, body_consts, init_vals = split_list(args, [cond_nconsts, body_nconsts])
-
-  cond_fun = partial(core.eval_jaxpr, cond_jaxpr.jaxpr, (), ())
-  body_fun = partial(core.eval_jaxpr, body_jaxpr.jaxpr, (), ())
-
-  vals = init_vals
-  while cond_fun(*(cond_consts + vals))[0]:
-    vals = body_fun(*(body_consts + vals))
-  return vals
 
 def _while_loop_abstract_eval(*args, **kwargs):
   return kwargs["body_jaxpr"].out_avals
@@ -294,7 +279,7 @@ def _jaxtupletree_select(pred, on_true, on_false):
 
 while_p = lax.Primitive('while')
 while_p.multiple_results = True
-while_p.def_impl(_while_loop_impl)
+while_p.def_impl(partial(xla.apply_primitive, while_p))
 while_p.def_abstract_eval(_while_loop_abstract_eval)
 xla.initial_style_translations[while_p] = _while_loop_translation_rule
 batching.primitive_batchers[while_p] = _while_loop_batching_rule
@@ -302,48 +287,31 @@ batching.primitive_batchers[while_p] = _while_loop_batching_rule
 
 ### cond
 
+
+
 def cond(pred, true_operand, true_fun, false_operand, false_fun):
-  true_ops, true_jaxpr, true_pvals, true_consts, true_tree = \
-      _make_cond_jaxpr(true_fun, true_operand)
-  false_ops, false_jaxpr, false_pvals, false_consts, false_tree = \
-      _make_cond_jaxpr(false_fun, false_operand)
+  def trace_jaxpr(fun, operand):
+    ops, in_tree = tree_flatten((operand,))
+    fun, out_tree = flatten_fun_nokwargs(lu.wrap_init(fun), in_tree)
+    in_avals, _ = unzip2(map(_abstractify, ops_flat))
+    jaxpr = _make_typed_jaxpr(fun, in_avals)
+    return ops_flat, jaxpr, out_tree()
+
+  true_ops, true_jaxpr, true_tree = trace_jaxpr(true_fun, true_operand)
+  false_ops, false_jaxpr, false_tree = trace_jaxpr(false_fun, false_operand)
 
   if true_tree != false_tree:
-    msg = "true_fun and false_fun outputs must have identical structure"
+    msg = "true_fun and false_fun outputs must have identical tree structure"
     raise TypeError(msg)
-  else:
-    out_tree = true_tree
+  if true_jaxpr.out_avals != false_jaxpr.out_avals:
+    msg = "true_fun and false_fun outputs must have identical types"
+    raise TypeError(msg)
 
-  try:
-    joined_pvals = map(pe.join_pvals, true_pvals, false_pvals)
-  except TypeError:
-    msg = ("could not merge true_fun and false_fun outputs to consistent type: "
-           "{} and {}".format(true_pvals, false_pvals))
-    raise TypeError(msg.format(true_pvals, false_pvals))
-  instantiate = [pv is not None for pv, _ in joined_pvals]
-  true_jaxpr = _remake_cond_jaxpr(true_jaxpr, true_ops, true_consts, instantiate)
-  false_jaxpr = _remake_cond_jaxpr(false_jaxpr, false_ops, false_consts, instantiate)
-
-  out = cond_p.bind(*itertools.chain([pred], true_op, true_consts,
-                                     false_op, false_consts),
+  out = cond_p.bind(*itertools.chain([pred], true_ops,
+                                     false_ops, false_consts),
                     true_jaxpr=true_jaxpr, false_jaxpr=false_jaxpr)
-  out = map(pe.merge_pvals, out, joined_pvals)
-  return tree_unflatten(out_tree, out)
-
-def _make_cond_jaxpr(fun, operand):
-  ops_flat, in_tree = tree_flatten((operand,))
-  in_pvals = map(_abstractify, ops_flat)
-  fun_flat, out_tree = flatten_fun_nokwargs(lu.wrap_init(fun), in_tree)
-  jaxpr, out_pvals, consts = pe.trace_to_jaxpr(traceable, pvals)
-  return ops_flat, jaxpr, out_pvals, consts, out_tree
-
-def _remake_cond_jaxpr(jaxpr, args, consts, instantiate):
-  f = lu.wrap_init(partial(core.eval_jaxpr, jaxpr, consts, ()))
-  pvals_in = map(_abstractify, args)
-  new_jaxpr, pvals_out, consts = pe.trace_to_jaxpr(
-      traceable, pvals_in, instantiate=instantiate)
-  out_avals, _ = 
-  return core.TypedJaxpr(new_jaxpr, consts, jaxpr.in_avals, jaxpr.out_avals)
+  out = pe.merge_pvals(out, joined_pval)
+  return tree_unflatten(true_tree, out)
 
 def _revise_cond_jaxpr(new_pval, old_pval, jaxpr, consts):
   new_pv, new_const = new_pval
@@ -742,6 +710,19 @@ def _scan_transpose(cts, *args, **kwargs):
       linear=linear_trans)
   ct_consts, ct_init, ct_xs = split_list(outs, [num_consts, num_carry])
   return ct_consts + ct_init + ct_xs + [None] * len(res)
+
+# # transpose_jaxpr :: Int -> ([a, res] -> b) -> ([CT b, res] -> CT a)
+# def _transpose_jaxpr(num_res, jaxpr):
+#   num_lin = len(jaxpr.in_avals) - num_res
+#   num_out = len(jaxpr.out_avals)
+
+#   @lu.wrap_init
+#   def transposed(*bbar_res):
+#     b_bar, res = bbar_res[:num_out], bbar_res[num_out:]
+#     primals = (ad.undefined_primal,) * num_lin + res
+#     _, abar_res = ad.backward_pass(jaxpr.jaxpr, jaxpr.literals, (), primals, b_bar)
+#     return map(ad.instantiate_zeros_aval, jaxpr.in_avals[:num_lin], abar_res[:num_lin])
+#   return _make_typed_jaxpr(transposed, jaxpr.out_avals + jaxpr.in_avals[num_lin:])
 
 # transpose_jaxpr2 :: ([c, a, res] -> b) -> ([CT c, CT b, res] -> [CT c, CT a]
 def _transpose_jaxpr2(num_c, num_res, jaxpr):
