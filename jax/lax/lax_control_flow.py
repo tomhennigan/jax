@@ -303,19 +303,10 @@ batching.primitive_batchers[while_p] = _while_loop_batching_rule
 ### cond
 
 def cond(pred, true_operand, true_fun, false_operand, false_fun):
-  def trace_jaxpr(fun, operand):
-    ops_flat, in_tree = tree_flatten((operand,))
-    in_pvals = map(_abstractify, ops_flat)
-    fun_flat, out_tree = flatten_fun_nokwargs(lu.wrap_init(fun), in_tree)
-    jaxpr, out_pvals, consts = pe.trace_to_jaxpr(traceable, pvals)
-    # TODO not all out_avals are abstract values, some are None
-    in_avals, _ = unzip2(in_pvals)
-    out_avals, _ = unzip2(out_pvals)
-    jaxpr = core.TypedJaxpr(jaxpr, consts, in_avals, out_avals)
-    return ops_flat, out_pvals, jaxpr, out_tree()
-
-  true_ops, true_pvals, true_jaxpr, true_tree = trace_jaxpr(true_fun, true_operand)
-  false_ops, false_pvals, false_jaxpr, false_tree = trace_jaxpr(false_fun, false_operand)
+  true_ops, true_jaxpr, true_pvals, true_consts, true_tree = \
+      _make_cond_jaxpr(true_fun, true_operand)
+  false_ops, false_jaxpr, false_pvals, false_consts, false_tree = \
+      _make_cond_jaxpr(false_fun, false_operand)
 
   if true_tree != false_tree:
     msg = "true_fun and false_fun outputs must have identical structure"
@@ -330,8 +321,8 @@ def cond(pred, true_operand, true_fun, false_operand, false_fun):
            "{} and {}".format(true_pvals, false_pvals))
     raise TypeError(msg.format(true_pvals, false_pvals))
   instantiate = [pv is not None for pv, _ in joined_pvals]
-  true_jaxpr = _remake_jaxpr(true_jaxpr, instantiate=instantiate)
-  false_jaxpr = _remake_jaxpr(false_jaxpr, instantiate=instantiate)
+  true_jaxpr = _remake_cond_jaxpr(true_jaxpr, true_ops, true_consts, instantiate)
+  false_jaxpr = _remake_cond_jaxpr(false_jaxpr, false_ops, false_consts, instantiate)
 
   out = cond_p.bind(*itertools.chain([pred], true_op, true_consts,
                                      false_op, false_consts),
@@ -339,9 +330,16 @@ def cond(pred, true_operand, true_fun, false_operand, false_fun):
   out = map(pe.merge_pvals, out, joined_pvals)
   return tree_unflatten(out_tree, out)
 
-def _remake_jaxpr(jaxpr, instantiate):
-  f = lu.wrap_init(core.jaxpr_as_fun(jaxpr))
-  pvals_in = [pe.PartialVal((aval, core.unit)) for aval in jaxpr.in_avals]
+def _make_cond_jaxpr(fun, operand):
+  ops_flat, in_tree = tree_flatten((operand,))
+  in_pvals = map(_abstractify, ops_flat)
+  fun_flat, out_tree = flatten_fun_nokwargs(lu.wrap_init(fun), in_tree)
+  jaxpr, out_pvals, consts = pe.trace_to_jaxpr(traceable, pvals)
+  return ops_flat, jaxpr, out_pvals, consts, out_tree
+
+def _remake_cond_jaxpr(jaxpr, args, consts, instantiate):
+  f = lu.wrap_init(partial(core.eval_jaxpr, jaxpr, consts, ()))
+  pvals_in = map(_abstractify, args)
   new_jaxpr, pvals_out, consts = pe.trace_to_jaxpr(
       traceable, pvals_in, instantiate=instantiate)
   out_avals, _ = 
