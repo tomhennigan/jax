@@ -62,6 +62,8 @@ class TypedJaxpr(object):
     assert type(jaxpr) is Jaxpr
     assert len(literals) == len(jaxpr.constvars)
     assert len(in_avals) == len(jaxpr.invars)
+    assert all(isinstance(aval, AbstractValue) for aval in in_avals)
+    assert all(isinstance(aval, AbstractValue) for aval in out_avals)
     assert not jaxpr.freevars
 
     self.jaxpr = jaxpr

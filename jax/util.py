@@ -66,6 +66,12 @@ def split_list(args, ns):
   lists.append(args)
   return lists
 
+def split_dict(dct, names):
+  dct = dict(dct)
+  lst = [dct.pop(name) for name in names]
+  assert not dct
+  return lst
+
 def concatenate(xs):
   return list(it.chain.from_iterable(xs))
 

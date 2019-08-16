@@ -136,12 +136,11 @@ def xla_primitive_callable(prim, *abstract_args, **params):
                              backend=xb.get_backend())
   return partial(_execute_compiled_primitive, prim, compiled, handle_result)
 
-@cache()
-def primitive_computation(prim, *shapes, **params):
-  """Builds an XLA computation for `prim` with argument `shapes`."""
+@memoize
+def primitive_computation(prim, *xla_shapes, **params):
   c = xb.make_computation_builder("primitive_computation")
   platform = xb.get_backend().platform
-  xla_args = map(c.ParameterWithShape, shapes)
+  xla_args = map(c.ParameterWithShape, xla_shapes)
   if prim in backend_specific_translations[platform]:
     rule = backend_specific_translations[platform][prim]
     rule(c, *xla_args, **params)  # return val set as a side-effect on c
@@ -153,12 +152,7 @@ def primitive_computation(prim, *shapes, **params):
     rule(c, AxisEnv(1, [], []), *xla_args, **params)  # side-effect on c
   else:
     raise NotImplementedError("XLA translation rule for {} not found".format(prim))
-  try:
-    return c.Build()
-  except RuntimeError as e:
-    # try for a better error message by using the abstract_eval checks
-    prim.abstract_eval(*map(aval_from_xla_shape, shapes), **params)
-    raise e
+  return c.Build()
 
 def _execute_compiled_primitive(prim, compiled, result_handler, *args):
   device_num, = compiled.DeviceOrdinals()
