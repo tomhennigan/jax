@@ -85,15 +85,8 @@ class TypedJaxpr(object):
     return TypedJaxpr(self.jaxpr.copy(), self.literals[:], self.in_avals[:],
                       self.out_avals[:])
 
-def typecheck(aval, x):
-  try:
-    return aval == lattice_join(aval, get_aval(x))
-  except TypeError:
-    return False
-
 @curry
 def jaxpr_as_fun(typed_jaxpr, *args):
-  # assert all(map(typecheck, typed_jaxpr.in_avals, args))  # TODO ensure shaped
   return eval_jaxpr(typed_jaxpr.jaxpr, typed_jaxpr.literals, (), *args)
 
 

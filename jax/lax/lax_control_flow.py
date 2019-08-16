@@ -30,7 +30,7 @@ from jax import core
 from jax.lax import lax
 from jax.lax import _abstractify
 from jax import linear_util as lu
-from jax.abstract_arrays import ConcreteArray, ShapedArray, UnshapedArray
+from jax.abstract_arrays import ShapedArray, raise_to_shaped
 from jax.api_util import flatten_fun_nokwargs
 from jax.interpreters import batching
 from jax.interpreters import partial_eval as pe
@@ -56,6 +56,16 @@ def _initial_style_jaxpr(fun, in_tree, in_vals):
   typed_jaxpr = core.TypedJaxpr(pe.closure_convert_jaxpr(jaxpr),
                                 (), const_avals + in_avals, out_avals)
   return typed_jaxpr, consts, out_tree()
+
+def typecheck(aval, x):
+  aval = raise_to_shaped(aval)
+  try:
+    return aval == core.lattice_join(aval, core.get_aval(x))
+  except TypeError:
+    return False
+
+def typematch(aval1, aval2):
+  return raise_to_shaped(aval1) == raise_to_shaped(aval2)
 
 
 ### fori_loop and while_loop
@@ -163,10 +173,9 @@ def _while_loop_translation_rule(c, axis_env, *args, **kwargs):
   # generating a Call into the computations formed from the jaxprs.
 
   init_carry = c.Tuple(*(cond_consts + body_consts + init_vals))
-  carry_shape = c.GetShape(init_carry)
 
   cond_c = xb.make_computation_builder("cond_computation")
-  cond_carry = cond_c.ParameterWithShape(carry_shape)
+  cond_carry = cond_c.ParameterWithShape(c.GetShape(init_carry))
   cond_carry_elts = [cond_c.GetTupleElement(cond_carry, i) for i in range(len(args))]
   x, _, z = split_list(cond_carry_elts, [cond_nconsts, body_nconsts])
   cond_outs = cond_c.Call(
@@ -180,7 +189,7 @@ def _while_loop_translation_rule(c, axis_env, *args, **kwargs):
                          list(range(cond_jaxpr.out_avals[0].ndim)))
 
   body_c = xb.make_computation_builder("body_computation")
-  body_carry = body_c.ParameterWithShape(carry_shape)
+  body_carry = body_c.ParameterWithShape(c.GetShape(init_carry))
   body_carry_elts = [body_c.GetTupleElement(body_carry, i) for i in range(len(args))]
   x, y, z = split_list(body_carry_elts, [cond_nconsts, body_nconsts])
   body_out = body_c.Call(
@@ -253,11 +262,13 @@ def cond(pred, true_operand, true_fun, false_operand, false_fun):
   false_ops, false_tree = tree_flatten((false_operand,))
   false_jaxpr, false_consts, out_tree2 = _initial_style_jaxpr(false_fun, false_tree, false_ops)
   if out_tree != out_tree2:
-    msg = "true_fun and false_fun outputs must have identical tree structure"
-    raise TypeError(msg)
-  if true_jaxpr.out_avals != false_jaxpr.out_avals:
-    msg = "true_fun and false_fun outputs must have identical types"
-    raise TypeError(msg)
+    msg = ("true_fun and false_fun outputs must have identical tree structure, "
+           "got {} and {}.")
+    raise TypeError(msg.format(out_tree, out_tree2))
+  if not all(map(typematch, true_jaxpr.out_avals, false_jaxpr.out_avals)):
+    msg = ("true_fun and false_fun outputs must have identical types, "
+           "got {} and {}.")
+    raise TypeError(msg.format(true_jaxpr.out_avals, false_jaxpr.out_avals))
   out = cond_p.bind(
       *itertools.chain([pred], true_consts, true_ops, false_consts, false_ops),
       true_jaxpr=true_jaxpr, false_jaxpr=false_jaxpr,
@@ -265,8 +276,8 @@ def cond(pred, true_operand, true_fun, false_operand, false_fun):
   return tree_unflatten(out_tree, out)
 
 def _cond_impl(pred, *args, **kwargs):
-  true_jaxpr, false_jaxpr, true_nconsts, body_nconsts = split_dict(
-      kwargs, ["true_jaxpr", "false_jaxpr", "true_nconsts", "body_nconsts"])
+  true_jaxpr, false_jaxpr, true_nconsts, false_nconsts = split_dict(
+      kwargs, ["true_jaxpr", "false_jaxpr", "true_nconsts", "false_nconsts"])
   true_consts, true_ops, false_consts, false_ops = split_list(
       args, [true_nconsts, len(true_jaxpr.in_avals), false_nconsts])
 
@@ -282,33 +293,31 @@ def _cond_abstract_eval(*args, **kwargs):
   return kwargs["true_jaxpr"].out_avals
 
 def _cond_translation_rule(c, axis_env, pred, *args, **kwargs):
-  true_jaxpr, false_jaxpr, true_nconsts, body_nconsts = split_dict(
-      kwargs, ["true_jaxpr", "false_jaxpr", "true_nconsts", "body_nconsts"])
-  assert False, "update it"
+  true_jaxpr, false_jaxpr, true_nconsts, false_nconsts = split_dict(
+      kwargs, ["true_jaxpr", "false_jaxpr", "true_nconsts", "false_nconsts"])
+  true_nops = len(true_jaxpr.in_avals) - true_nconsts
+  false_nops = len(false_jaxpr.in_avals) - false_nconsts
+  true_consts, true_ops, false_consts, false_ops = split_list(
+      args, [true_nconsts, true_nops, false_nconsts])
 
-  def make_computation(jaxpr, operand):
-    assert len(jaxpr.invars) == 1
-    arg_var = pe.Var(0, "arg")
-    consts_var = pe.Var(0, "consts")
-    jaxpr_converted = jaxpr.copy()
-    jaxpr_converted.constvars = []
-    jaxpr_converted.invars = [arg_var]
-    jaxpr_converted.eqns = (
-        [_unpack_eqn(arg_var, [jaxpr.invars[0], consts_var]),
-        _unpack_eqn(consts_var, jaxpr.constvars)]
-        + list(jaxpr.eqns))
-    return xla.jaxpr_computation(jaxpr_converted, axis_env, (), (),
-                                 c.GetShape(operand))
+  def make_computation(name, jaxpr, op_shape):
+    c = xb.make_computation_builder(name)
+    op = c.ParameterWithShape(op_shape)
+    ops = [c.GetTupleElement(op, i) for i in range(len(jaxpr.in_avals))]
+    out = c.Call(xla.jaxpr_computation(jaxpr.jaxpr, axis_env, (), (),
+                                       *map(c.GetShape, ops)), ops)
+    return c.Build(out)
 
-  true_arg = c.Tuple(true_op, true_consts)
-  true_comp = make_computation(true_jaxpr, true_arg)
+  true_op = c.Tuple(*(true_consts + true_ops))
+  true_c = make_computation("true_comp", true_jaxpr, c.GetShape(true_op))
 
-  false_arg = c.Tuple(false_op, false_consts)
-  false_comp = make_computation(false_jaxpr, false_arg)
+  false_op = c.Tuple(*(false_consts + false_ops))
+  false_c = make_computation("false_comp", false_jaxpr, c.GetShape(false_op))
 
-  return c.Conditional(pred, true_arg, true_comp, false_arg, false_comp)
+  return c.Conditional(pred, true_op, true_c, false_op, false_c)
 
 cond_p = lax.Primitive('cond')
+cond_p.multiple_results = True
 cond_p.def_impl(_cond_impl)
 cond_p.def_abstract_eval(_cond_abstract_eval)
 xla.initial_style_translations[cond_p] = _cond_translation_rule
@@ -683,9 +692,9 @@ def scan_bind(*args, **kwargs):
   # check that args match input types
   consts_avals, init_avals, x_avals = split_list(jaxpr.in_avals, [num_consts, num_carry])
   xs_avals = map(partial(_promote_aval_rank, length), x_avals)
-  assert all(map(core.typecheck, consts_avals, consts))
-  assert all(map(core.typecheck, init_avals, init))
-  assert all(map(core.typecheck, xs_avals, xs))
+  assert all(map(typecheck, consts_avals, consts))
+  assert all(map(typecheck, init_avals, init))
+  assert all(map(typecheck, xs_avals, xs))
 
   # check that output carry type matches input carry type
   carry_avals, _ = split_list(jaxpr.out_avals, [num_carry])

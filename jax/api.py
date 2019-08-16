@@ -693,10 +693,10 @@ def pmap(fun, axis_name=None):
     f = lu.wrap_init(fun)
     args_flat, in_tree = tree_flatten((args, kwargs))
     _check_args(args_flat)
-    flat_fun, out_tree = flatten_fun_leafout(f, in_tree)
+    flat_fun, out_tree = flatten_fun(f, in_tree)
     out = pxla.xla_pmap(flat_fun, *args_flat,
                         axis_name=axis_name, axis_size=axis_size)
-    return out if out_tree() is leaf else tree_unflatten(out_tree(), out)
+    return tree_unflatten(out_tree(), out)
 
   namestr = "pmap({}, axis_name={})".format
   f_pmapped.__name__ = namestr(f_pmapped.__name__, axis_name)
