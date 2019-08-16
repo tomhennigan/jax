@@ -154,6 +154,7 @@ def _while_loop_translation_rule(c, axis_env, *args, **kwargs):
   cond_jaxpr, body_jaxpr, cond_nconsts, body_nconsts = split_dict(
       kwargs, ["cond_jaxpr", "body_jaxpr", "cond_nconsts", "body_nconsts"])
   cond_consts, body_consts, init_vals = split_list(args, [cond_nconsts, body_nconsts])
+  batched = bool(cond_jaxpr.out_avals[0].shape)
 
   # Since jaxprs don't have tuples and have multiple return values, but we need
   # the HLO While loop to take a single tuple input and output a single boolean
@@ -161,8 +162,8 @@ def _while_loop_translation_rule(c, axis_env, *args, **kwargs):
   # computation), we build XLA computations that handle the tuple munging before
   # generating a Call into the computations formed from the jaxprs.
 
-  loop_carry = c.Tuple(*(cond_consts + body_consts + init_vals))
-  carry_shape = c.GetShape(loop_carry)
+  init_carry = c.Tuple(*(cond_consts + body_consts + init_vals))
+  carry_shape = c.GetShape(init_carry)
 
   cond_c = xb.make_computation_builder("cond_computation")
   cond_carry = cond_c.ParameterWithShape(carry_shape)
@@ -171,32 +172,37 @@ def _while_loop_translation_rule(c, axis_env, *args, **kwargs):
   cond_outs = cond_c.Call(
       xla.jaxpr_computation(cond_jaxpr.jaxpr, axis_env, (), (),
                             *map(cond_c.GetShape, x + z)), x + z)
-      pred = cond_c.GetTupleElement(cond_outs, 0)
-  if cond_jaxpr.out_avals[0].shape:
-    scalar = xla_bridge.Shape.array_shape(onp.dtype(onp.bool_), ())
+  pred = cond_c.GetTupleElement(cond_outs, 0)
+  if batched:
+    scalar = xb.Shape.array_shape(onp.dtype(onp.bool_), ())
     or_ = xla.primitive_computation(lax.or_p, scalar, scalar)
-    pred = c.Reduce(pred, c.Constant(onp.array(False)), or_, [0])
-  cond_c = cond_c.Build(pred)
+    pred = cond_c.Reduce(pred, cond_c.Constant(onp.array(False)), or_,
+                         list(range(cond_jaxpr.out_avals[0].ndim)))
 
   body_c = xb.make_computation_builder("body_computation")
   body_carry = body_c.ParameterWithShape(carry_shape)
   body_carry_elts = [body_c.GetTupleElement(body_carry, i) for i in range(len(args))]
-  x, y, z = split_list(cond_carry_elts, [cond_nconsts, body_nconsts])
+  x, y, z = split_list(body_carry_elts, [cond_nconsts, body_nconsts])
   body_out = body_c.Call(
       xla.jaxpr_computation(body_jaxpr.jaxpr, axis_env, (), (),
                             *map(body_c.GetShape, y + z)), y + z)
-  z = [body_c.GetTupleElement(body_out, i) for i in range(len(init_vals))]
-  body_c = body_c.Build(body_c.Tuple(*(x + y + z)))
+  new_z = [body_c.GetTupleElement(body_out, i) for i in range(len(init_vals))]
+  if batched:
+    body_cond_outs = body_c.Call(
+        xla.jaxpr_computation(cond_jaxpr.jaxpr, axis_env, (), (),
+                              *map(body_c.GetShape, x + z)), x + z)
+    body_pred = body_c.GetTupleElement(body_cond_outs, 0)
+    new_z = map(partial(body_c.Select, body_pred), new_z, z)
+    assert map(body_c.GetShape, new_z) == map(body_c.GetShape, z) # no broadcast
+  new_carry = body_c.Tuple(*(x + y + new_z))
 
-  ans = c.While(cond_c, body_c, loop_carry)
+  ans = c.While(cond_c.Build(pred), body_c.Build(new_carry), init_carry)
   ans_elts = [c.GetTupleElement(ans, i) for i in range(len(args))]
   _,  _, z = split_list(ans_elts, [cond_nconsts, body_nconsts])
   return c.Tuple(*z)
 
 def _while_loop_batching_rule(args, dims, cond_nconsts, cond_jaxpr,
                               body_nconsts, body_jaxpr):
-  cond_jaxpr, body_jaxpr, cond_nconsts, body_nconsts = split_dict(
-      kwargs, ["cond_jaxpr", "body_jaxpr", "cond_nconsts", "body_nconsts"])
   size, = {x.shape[d] for x, d in zip(args, dims) if d is not batching.not_mapped}
   orig_batched = [d is not batching.not_mapped for d in dims]
   cconst_bat, bconst_bat, init_bat = split_list(orig_batched, [cond_nconsts, body_nconsts])
@@ -206,15 +212,15 @@ def _while_loop_batching_rule(args, dims, cond_nconsts, cond_jaxpr,
     batched = bconst_bat + carry_bat
     body_jaxpr_batched, carry_bat_out = batching.batch_jaxpr(
         body_jaxpr, size, batched, instantiate=carry_bat)
+    cond_jaxpr_batched, (pred_bat,) = batching.batch_jaxpr(
+        cond_jaxpr, size, cconst_bat + carry_bat, instantiate=False)
+    carry_bat_out = map(partial(operator.or_, pred_bat), carry_bat_out)
     if carry_bat_out == carry_bat:
       break
     else:
       carry_bat = carry_bat_out
   else:
     raise FixedPointError
-
-  cond_jaxpr_batched, (cond_batched,) = batching.batch_jaxpr(
-      cond_jaxpr, size, cconst_bat + carry_bat, instantiate=False)
 
   consts, init = split_list(args, [cond_nconsts + body_nconsts])
   const_dims, init_dims = split_list(dims, [cond_nconsts + body_nconsts])
@@ -224,9 +230,11 @@ def _while_loop_batching_rule(args, dims, cond_nconsts, cond_jaxpr,
               else batching.moveaxis(x, d, 0) if now_bat else x
               for x, d, was_bat, now_bat in zip(init, init_dims, init_bat, carry_bat)]
 
-  return while_p.bind(*(new_consts + new_init), cond_nconsts=cond_nconsts,
-                      cond_jaxpr=cond_jaxpr, body_nconsts=body_nconsts,
-                      body_jaxpr=body_jaxpr)
+  outs = while_p.bind(*(new_consts + new_init),
+                      cond_nconsts=cond_nconsts, cond_jaxpr=cond_jaxpr_batched,
+                      body_nconsts=body_nconsts, body_jaxpr=body_jaxpr_batched)
+  out_bdims = [0 if b else batching.not_mapped for b in carry_bat]
+  return outs, out_bdims
 
 
 while_p = lax.Primitive('while')

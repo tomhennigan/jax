@@ -403,6 +403,8 @@ def batched_traceable(size, batched, instantiate, *vals):
     out_tracers = map(trace.full_raise, ans)
     out_vals, out_dims = unzip2((t.val, t.batch_dim) for t in out_tracers)
     del master, out_tracers
+  if type(instantiate) is bool:
+    instantiate = [instantiate] * len(out_vals)
   out_vals = [moveaxis(x, d, 0) if d is not not_mapped and d != 0
               else broadcast(x, size, 0) if d is not_mapped and inst else x
               for x, d, inst in zip(out_vals, out_dims, instantiate)]
