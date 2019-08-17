@@ -102,57 +102,6 @@ pxla_result_handlers[ShapedArray] = array_result_handler
 pxla_result_handlers[ConcreteArray] = array_result_handler
 
 
-# def sharded_result_handler(axis_size, aval):
-#   full_aval = add_axis_to_aval(axis_size, aval)
-#   if type(aval) is core.AbstractTuple:
-#     return partial(sharded_tuple_result_handler, axis_size, full_aval)
-#   elif isinstance(aval, ShapedArray):
-#     return partial(sharded_array_result_handler, full_aval)
-#   else:
-#     raise TypeError(type(aval))
-
-# def sharded_array_result_handler(aval, replica_results):
-#   t, = set(map(type, replica_results))
-#   if t is xla.DeviceArray:
-#     bufs = [r.device_buffer for r in replica_results]
-#     return ShardedDeviceArray(aval, bufs)
-#   else:
-#     assignments = assign_shards_to_replicas(len(replica_results), aval.shape[0])
-#     _, ids = onp.unique(assignments, return_index=True)
-#     return onp.stack([replica_results[i] for i in ids])
-
-# def sharded_tuple_result_handler(axis_size, aval, replica_results):
-#   t, = set(map(type, replica_results))
-#   if t is xla.DeviceTuple:
-#     bufs = [r.device_buffer for r in replica_results]
-#     return ShardedDeviceTuple(axis_size, aval, bufs)
-#   elif t is core.JaxTuple:
-#     # e.g. pmap(lambda x: core.pack((3, x)))(...)
-#     reduced_aval = remove_axis_from_aval(aval)
-#     all_results = zip(*replica_results)
-#     return core.pack([sharded_result_handler(axis_size, elt_aval)(results)
-#                       for elt_aval, results in zip(reduced_aval, all_results)])
-#   else:
-#     raise TypeError(t)
-
-
-# def add_axis_to_aval(n, aval):
-#   if type(aval) is core.AbstractTuple:
-#     return core.AbstractTuple(map(partial(add_axis_to_aval, n), aval))
-#   elif isinstance(aval, ShapedArray):
-#     return ShapedArray((n,) + aval.shape, aval.dtype)
-#   else:
-#     raise TypeError(type(aval))
-
-# def remove_axis_from_aval(aval):
-#   if type(aval) is core.AbstractTuple:
-#     return core.AbstractTuple(map(remove_axis_from_aval, aval))
-#   elif isinstance(aval, ShapedArray):
-#     return ShapedArray(aval.shape[1:], aval.dtype)
-#   else:
-#     raise TypeError(aval)
-
-
 def assign_shards_to_replicas(nrep, size):
   """Produce a mapping from replica id to shard index.
 
