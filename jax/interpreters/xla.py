@@ -91,6 +91,7 @@ device_put_handlers[core.Unit] = lambda _, n: xb.device_put((), n)
 for _t in array_types:
   device_put_handlers[_t] = xb.device_put
 
+# TODO(mattjj): try to remove this canonicalize_dtype stuff
 def canonicalize_dtype(x):
   try:
     return canonicalize_dtype_handlers[type(x)](x)

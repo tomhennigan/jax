@@ -617,7 +617,7 @@ def _scan_transpose(cts, *args, **kwargs):
   ct_consts, ct_init, ct_xs = split_list(outs, [num_consts, num_carry])
   return ct_consts + ct_init + ct_xs + [None] * len(res)
 
-# transpose_jaxpr2 :: ([c, a, res] -> b) -> ([CT c, CT b, res] -> [CT c, CT a]
+# transpose_jaxpr :: ([c, a, res] -> b) -> ([CT c, CT b, res] -> [CT c, CT a]
 def _transpose_jaxpr(num_c, num_res, jaxpr):
   num_a = len(jaxpr.in_avals) - num_c - num_res
   c_avals, a_avals, res_avals = split_list(jaxpr.in_avals, [num_c, num_a])
