@@ -67,6 +67,8 @@ def typecheck(aval, x):
 def typematch(aval1, aval2):
   return raise_to_shaped(aval1) == raise_to_shaped(aval2)
 
+class FixedPointError(Exception): pass
+
 
 ### fori_loop and while_loop
 
@@ -245,7 +247,6 @@ def _while_loop_batching_rule(args, dims, cond_nconsts, cond_jaxpr,
   out_bdims = [0 if b else batching.not_mapped for b in carry_bat]
   return outs, out_bdims
 
-
 while_p = lax.Primitive('while')
 while_p.multiple_results = True
 while_p.def_impl(partial(xla.apply_primitive, while_p))
@@ -323,42 +324,7 @@ cond_p.def_abstract_eval(_cond_abstract_eval)
 xla.initial_style_translations[cond_p] = _cond_translation_rule
 
 
-def _maybe_tracer_tuple_to_abstract_tuple(tup):
-  if isinstance(tup, pe.JaxprTracerTuple):
-    return core.AbstractTuple(list(map(_maybe_tracer_tuple_to_abstract_tuple, tup)))
-  elif isinstance(tup, core.AbstractValue):
-    return tup
-  elif tup is None:
-    return core.AbstractTuple(())
-  else:
-    raise TypeError(tup)
-
-
 ### scan
-
-def _convert_zeros(instantiate, example, tangent):
-  assert False, "update it"
-  t = type(instantiate)
-  if t is bool:
-    if instantiate:
-      return ad.instantiate_zeros(example, tangent)
-    elif tangent is ad_util.zero:
-      return core.unit
-    else:
-      raise TypeError(tangent)  # not clear if ever reachable
-  elif t is tuple:
-    if type(tangent) is ad.TangentTuple:
-      return core.pack(map(_convert_zeros, instantiate, example, tangent))
-    elif tangent is ad_util.zero:
-      zeros = [ad_util.zero] * len(instantiate)
-      return core.pack(map(_convert_zeros, instantiate, example, zeros))
-    else:
-      raise TypeError(tangent)
-  else:
-    raise TypeError(t)
-
-class FixedPointError(Exception): pass
-
 
 def scan(f, init, xs):
   """Scan a function over leading array axes while carrying along state.
@@ -686,7 +652,6 @@ def scan_bind(*args, **kwargs):
   forward, length, num_consts, num_carry, jaxpr, linear = split_dict(
       kwargs, ["forward", "length", "num_consts", "num_carry", "jaxpr", "linear"])
   consts, init, xs = split_list(args, [num_consts, num_carry])
-
   assert len(linear) == len(args)
 
   # check that args match input types
@@ -698,7 +663,7 @@ def scan_bind(*args, **kwargs):
 
   # check that output carry type matches input carry type
   carry_avals, _ = split_list(jaxpr.out_avals, [num_carry])
-  # assert init_avals == carry_avals  # TODO carry can be more specific than init
+  assert all(map(typematch, init_avals, carry_avals))
 
   # check that the data flow is sensible
   core.check_jaxpr(jaxpr.jaxpr)
