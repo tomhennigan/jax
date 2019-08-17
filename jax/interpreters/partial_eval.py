@@ -124,6 +124,7 @@ class JaxprTrace(Trace):
     return out_tracers
 
   def process_map(self, map_primitive, f, tracers, params):
+    assert False, "update it"
     in_pvs, in_consts = unzip2([t.pval for t in tracers])
     reduced_pvs = map(remove_axis_from_pv, in_pvs)
     fun, aux = partial_eval(f, self, reduced_pvs)

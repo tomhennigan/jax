@@ -3992,6 +3992,7 @@ for _t in [_FilledConstant, _IotaConstant, _EyeConstant]:
   core.pytype_aval_mappings[_t] = ConcreteArray
   xla.pytype_aval_mappings[_t] = make_shaped_array
   xla.device_put_handlers[_t] = xla._instantiate_device_constant
+  pxla.shard_arg_handlers[_t] = pxla._shard_array
   xla.canonicalize_dtype_handlers[_t] = _identity
   ad_util.jaxval_adders[_t] = add
   ad_util.jaxval_zeros_likers[_t] = zeros_like_array

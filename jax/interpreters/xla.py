@@ -349,33 +349,30 @@ def _xla_callable(fun, device_assignment, device_values, *abstract_args):
     del master, consts, jaxpr, env
   result_handlers = tuple(map(_pval_to_result_handler, pvals))
   if axis_env.nreps == 1:
-    return partial(_execute_compiled, compiled, pvals, result_handlers)
+    return partial(_execute_compiled, compiled, result_handlers)
   else:
-    return partial(_execute_replicated, compiled, pvals, result_handlers)
+    return partial(_execute_replicated, compiled, result_handlers)
 
 def _pval_to_result_handler(pval):
   pv, const = pval
   if pv is None:
     return lambda _: const
   else:
-    assert isinstance(pv, core.AbstractValue)
     return aval_to_result_handler(pv)
 
-def _execute_compiled(compiled, pvals, handlers, *args):
+def _execute_compiled(compiled, handlers, *args):
   device_num, = compiled.DeviceOrdinals()
   input_bufs = [device_put(x, device_num) for x in args]
   out_bufs = compiled.Execute(input_bufs).destructure()
   if FLAGS.jax_debug_nans: check_nans(xla_call_p, out_buf)
-  return [pe.merge_pvals(handler(out_buf), pval)
-          for handler, out_buf, pval in zip(handlers, out_bufs, pvals)]
+  return [handler(out_buf) for handler, out_buf in zip(handlers, out_bufs)]
 
-def _execute_replicated(compiled, pval, handlers, *args):
+def _execute_replicated(compiled, handlers, *args):
   input_bufs = [[device_put(x, i) for x in args]
                 for i in compiled.DeviceOrdinals()]
   out_bufs = compiled.ExecutePerReplica(input_bufs)[0].destructure()
   if FLAGS.jax_debug_nans: check_nans(xla_call_p, out_buf)
-  return [pe.merge_pvals(handler(out_buf), pval)
-          for handler, out_buf, pval in zip(handlers, out_bufs, pvals)]
+  return [handler(out_buf) for handler, out_buf in zip(handlers, out_bufs)]
 
 
 xla_call_p = core.Primitive('xla_call')

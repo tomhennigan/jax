@@ -67,89 +67,90 @@ def shard_args(device_ordinals, assignments, axis_size, args):
     for r, buf in enumerate(bufs):
       buffers[r][a] = buf
   return buffers
-
 shard_arg_handlers = {}
 shard_arg_handlers[core.Unit] = \
     lambda x, ordinals, _: [device_put((), d) for d in ordinals]
 def _shard_array(x, ordinals, assignments):
-  return (device_put(x[assignments[r]], ordinals[r]) for r in range(len(ordinals)))
-for _t in array_types:
+  nrep = len(ordinals)
+  return (xla.device_put(x[assignments[r]], ordinals[r]) for r in range(nrep))
+for _t in it.chain(array_types, [xla.DeviceArray]):
   shard_arg_handlers[_t] = _shard_array
 
-def xla_shard(c, sizes, x):
-  dims = list(shape.dimensions())
-  assert dims[0] == sizes[-1]
-  start_indices = _xla_shard_start_indices(c, dims[0], len(dims))
-  return c.Reshape(c.DynamicSlice(x, start_indices, [1] + dims[1:]),
-                   None, dims[1:])
+def shard_aval(size, aval):
+  try:
+    return shard_aval_handlers[type(aval)](size, aval)
+  except KeyError:
+    raise TypeError("No shard_aval handler for type: {}".format(type(aval)))
+shard_aval_handlers = {}
+shard_aval_handlers[core.Unit] = lambda size, x: x
+def _shard_abstract_array(size, x):
+  assert x.shape[0] == size
+  return ShapedArray(x.shape[1:], x.dtype)
+shard_aval_handlers[ShapedArray] = _shard_abstract_array
 
-# TODO(b/110096942): more efficient gather
-def xla_unshard(c, replica_groups, x):
-  axis_size = len(replica_groups[0])
-  dims = list(shape.dimensions())
-  start_indices = _xla_shard_start_indices(c, axis_size, len(dims) + 1)
-  padded = c.Broadcast(c.Constant(onp.array(0, shape.numpy_dtype())),
-                       [axis_size] + dims)
-  padded = c.DynamicUpdateSlice(padded, c.Reshape(x, None, [1] + dims),
-                                start_indices)
-  return c.CrossReplicaSum(padded, replica_groups)
-
-# TODO(mattjj): use more ergonimic form of DynamicUpdateSlice instead!
-def _xla_shard_start_indices(c, axis_size, ndim):
-  idx = c.Rem(c.ReplicaId(), c.Constant(onp.array(axis_size, onp.uint32)))
-  zero = onp.zeros(ndim - 1, onp.uint32)
-  return c.Concatenate([c.Reshape(idx, None, [1]), c.Constant(zero)], 0)
-
-
-def sharded_result_handler(axis_size, aval):
-  full_aval = add_axis_to_aval(axis_size, aval)
-  if type(aval) is core.AbstractTuple:
-    return partial(sharded_tuple_result_handler, axis_size, full_aval)
-  elif isinstance(aval, ShapedArray):
-    return partial(sharded_array_result_handler, full_aval)
-  else:
-    raise TypeError(type(aval))
-
-def sharded_array_result_handler(aval, replica_results):
-  t, = set(map(type, replica_results))
-  if t is xla.DeviceArray:
-    bufs = [r.device_buffer for r in replica_results]
-    return ShardedDeviceArray(aval, bufs)
-  else:
-    assignments = assign_shards_to_replicas(len(replica_results), aval.shape[0])
-    _, ids = onp.unique(assignments, return_index=True)
-    return onp.stack([replica_results[i] for i in ids])
-
-def sharded_tuple_result_handler(axis_size, aval, replica_results):
-  t, = set(map(type, replica_results))
-  if t is xla.DeviceTuple:
-    bufs = [r.device_buffer for r in replica_results]
-    return ShardedDeviceTuple(axis_size, aval, bufs)
-  elif t is core.JaxTuple:
-    # e.g. pmap(lambda x: core.pack((3, x)))(...)
-    reduced_aval = remove_axis_from_aval(aval)
-    all_results = zip(*replica_results)
-    return core.pack([sharded_result_handler(axis_size, elt_aval)(results)
-                      for elt_aval, results in zip(reduced_aval, all_results)])
-  else:
-    raise TypeError(t)
+def aval_to_result_handler(size, nrep, aval):
+  try:
+    return pxla_result_handlers[type(aval)](size, nrep, aval)
+  except KeyError:
+    raise TypeError("No pxla_result_handler for type: {}".format(type(aval)))
+pxla_result_handlers = {}
+pxla_result_handlers[core.AbstractUnit] = lambda _, __: lambda _: core.unit
+def array_result_handler(size, nrep, aval):
+  full_aval = ShapedArray((size,) + aval.shape, aval.dtype)
+  return partial(ShardedDeviceArray, full_aval)
+pxla_result_handlers[ShapedArray] = array_result_handler
+pxla_result_handlers[ConcreteArray] = array_result_handler
 
 
-def add_axis_to_aval(n, aval):
-  if type(aval) is core.AbstractTuple:
-    return core.AbstractTuple(map(partial(add_axis_to_aval, n), aval))
-  elif isinstance(aval, ShapedArray):
-    return ShapedArray((n,) + aval.shape, aval.dtype)
-  else:
-    raise TypeError(type(aval))
+# def sharded_result_handler(axis_size, aval):
+#   full_aval = add_axis_to_aval(axis_size, aval)
+#   if type(aval) is core.AbstractTuple:
+#     return partial(sharded_tuple_result_handler, axis_size, full_aval)
+#   elif isinstance(aval, ShapedArray):
+#     return partial(sharded_array_result_handler, full_aval)
+#   else:
+#     raise TypeError(type(aval))
 
-def remove_axis_from_aval(aval):
-  if type(aval) is core.AbstractTuple:
-    return core.AbstractTuple(map(remove_axis_from_aval, aval))
-  elif isinstance(aval, ShapedArray):
-    return ShapedArray(aval.shape[1:], aval.dtype)
-  else:
-    raise TypeError(aval)
+# def sharded_array_result_handler(aval, replica_results):
+#   t, = set(map(type, replica_results))
+#   if t is xla.DeviceArray:
+#     bufs = [r.device_buffer for r in replica_results]
+#     return ShardedDeviceArray(aval, bufs)
+#   else:
+#     assignments = assign_shards_to_replicas(len(replica_results), aval.shape[0])
+#     _, ids = onp.unique(assignments, return_index=True)
+#     return onp.stack([replica_results[i] for i in ids])
+
+# def sharded_tuple_result_handler(axis_size, aval, replica_results):
+#   t, = set(map(type, replica_results))
+#   if t is xla.DeviceTuple:
+#     bufs = [r.device_buffer for r in replica_results]
+#     return ShardedDeviceTuple(axis_size, aval, bufs)
+#   elif t is core.JaxTuple:
+#     # e.g. pmap(lambda x: core.pack((3, x)))(...)
+#     reduced_aval = remove_axis_from_aval(aval)
+#     all_results = zip(*replica_results)
+#     return core.pack([sharded_result_handler(axis_size, elt_aval)(results)
+#                       for elt_aval, results in zip(reduced_aval, all_results)])
+#   else:
+#     raise TypeError(t)
+
+
+# def add_axis_to_aval(n, aval):
+#   if type(aval) is core.AbstractTuple:
+#     return core.AbstractTuple(map(partial(add_axis_to_aval, n), aval))
+#   elif isinstance(aval, ShapedArray):
+#     return ShapedArray((n,) + aval.shape, aval.dtype)
+#   else:
+#     raise TypeError(type(aval))
+
+# def remove_axis_from_aval(aval):
+#   if type(aval) is core.AbstractTuple:
+#     return core.AbstractTuple(map(remove_axis_from_aval, aval))
+#   elif isinstance(aval, ShapedArray):
+#     return ShapedArray(aval.shape[1:], aval.dtype)
+#   else:
+#     raise TypeError(aval)
 
 
 def assign_shards_to_replicas(nrep, size):
@@ -204,11 +205,10 @@ def compile_replicated(jaxpr, axis_name, axis_size, consts, *abstract_args):
     raise ValueError(msg.format(num_replicas, xb.device_count()))
   axis_env = xla.AxisEnv(num_replicas, [axis_name], [axis_size])
   arg_shapes = list(map(aval_to_xla_shape, abstract_args))
-  built_c = xla._jaxpr_computation(jaxpr, axis_env, consts, (), *arg_shapes)
-  result_shape = aval_from_xla_shape(built_c.GetReturnValueShape())
+  built_c = xla.jaxpr_computation(jaxpr, axis_env, consts, (), *arg_shapes)
   compiled = built_c.Compile(arg_shapes, xb.get_compile_options(num_replicas),
                              backend=xb.get_backend())
-  return compiled, num_replicas, result_shape
+  return compiled, num_replicas
 
 
 ### applying parallel primitives in op-by-op Python dispatch
@@ -434,7 +434,7 @@ def xla_pmap_impl(fun, *args, **params):
 
 # @lu.cache  # TODO
 def parallel_callable(fun, axis_name, axis_size, *avals):
-  avals = tuple(a.shape[1:] for a in avals)
+  avals = map(partial(shard_aval, axis_size), avals)
   pvals = [PartialVal((aval, core.unit)) for aval in avals]
   pval = PartialVal([core.abstract_unit, core.unit])  # dummy value
 
@@ -458,37 +458,39 @@ def parallel_callable(fun, axis_name, axis_size, *avals):
     result_handler = sharded_result_handler(axis_size, xla.abstractify(out_const))
     return lambda *args: result_handler([out_const] * axis_size)
   else:
-    assert False, "update it"
-    out = compile_replicated(jaxpr, axis_name, axis_size, consts, *avals)
-    compiled, nrep, shard_result_shape = out
+    compiled, nrep = compile_replicated(jaxpr, axis_name, axis_size, consts, *avals)
     device_ordinals = compiled.DeviceOrdinals()
     assignments = assign_shards_to_replicas(nrep, axis_size)
-    handle_args = partial(shard_args, device_ordinals, assignments, axis_size,
-                          nrep)
-    handle_replica_result = xla.result_handler(shard_result_shape)
-    handle_full_result = sharded_result_handler(axis_size, merged_aval(out_pval))
-    return partial(execute_replicated, compiled, out_pval, nrep,
-                   handle_args, handle_replica_result, handle_full_result)
+    handle_args = partial(shard_args, device_ordinals, assignments, axis_size)
+    handle_outs = _pvals_to_results_handler(axis_size, nrep, out_pvals)
+    return partial(execute_replicated, compiled, nrep, handle_args, handle_outs)
 
-def merged_aval(pval):
+def _pvals_to_results_handler(size, nrep, out_pvals):
+  nouts = len(out_pvals)
+  handlers = [_pval_to_result_handler(size, nrep, pval) for pval in out_pvals]
+  def handler(out_bufs):
+    buffers = [[None] * nrep for _ in range(nouts)]
+    for r, tuple_buf in enumerate(out_bufs):
+      for i, buf in enumerate(tuple_buf.destructure()):
+        buffers[i][r] = buf
+    return [h(bufs) for h, bufs in zip(handlers, buffers)]
+  return handler
+
+def _pval_to_result_handler(size, nrep, pval):
   pv, const = pval
-  if isinstance(pv, core.AbstractValue):
-    return pv
-  elif pv is None:
-    return xla.abstractify(const)
+  if pv is None:
+    import ipdb; ipdb.set_trace() # TODO broadcast const?
   else:
-    raise TypeError(type(pv))
+    return aval_to_result_handler(size, nrep, pv)
 
-def execute_replicated(compiled, pval, nrep, handle_in,
-                       handle_replica_result, handle_full_result, *args):
+def execute_replicated(compiled, nrep, in_handler, out_handler, *args):
   if nrep > xb.device_count():
     msg = ("executing pmap computation that requires {} replicas, but only {} "
            "XLA devices are available")
     raise ValueError(msg.format(nrep, xb.device_count()))
-  input_bufs = handle_in(args)
+  input_bufs = in_handler(args)
   out_bufs = compiled.ExecutePerReplica(list(input_bufs))
-  results = [merge_pvals(handle_replica_result(buf), pval) for buf in out_bufs]
-  return handle_full_result(results)
+  return out_handler(out_bufs)
 
 
 xla_pmap_p = core.Primitive('xla_pmap')
@@ -498,16 +500,41 @@ xla_pmap_p.def_impl(xla_pmap_impl)
 
 def _xla_pmap_translation_rule(c, jaxpr, axis_env, env_nodes, in_nodes,
                                axis_name, axis_size):
+  assert False, "update it"
   new_env = xla.extend_axis_env(axis_env, axis_name, axis_size)
-  in_nodes_sharded = list(map(partial(xla_shard, c, new_env.sizes), in_nodes))
+  in_nodes_sharded = list(map(partial(_xla_shard, c, new_env.sizes), in_nodes))
   subc = xla._jaxpr_computation(jaxpr, new_env, (),
                                 tuple(map(c.GetShape, env_nodes)),
                                 *map(c.GetShape, in_nodes_sharded))
   sharded_result = c.Call(subc, env_nodes + in_nodes_sharded)
-  return xla_unshard(c, xla.axis_groups(new_env, axis_name), sharded_result)
+  return _xla_unshard(c, xla.axis_groups(new_env, axis_name), sharded_result)
 xla.call_translations[xla_pmap_p] = _xla_pmap_translation_rule
 ad.primitive_transposes[xla_pmap_p] = partial(ad.map_transpose, xla_pmap_p)
 pe.map_primitives.add(xla_pmap_p)
+
+def _xla_shard(c, sizes, x):
+  dims = list(shape.dimensions())
+  assert dims[0] == sizes[-1]
+  start_indices = _xla_shard_start_indices(c, dims[0], len(dims))
+  return c.Reshape(c.DynamicSlice(x, start_indices, [1] + dims[1:]),
+                   None, dims[1:])
+
+# TODO(b/110096942): more efficient gather
+def _xla_unshard(c, replica_groups, x):
+  axis_size = len(replica_groups[0])
+  dims = list(shape.dimensions())
+  start_indices = _xla_shard_start_indices(c, axis_size, len(dims) + 1)
+  padded = c.Broadcast(c.Constant(onp.array(0, shape.numpy_dtype())),
+                       [axis_size] + dims)
+  padded = c.DynamicUpdateSlice(padded, c.Reshape(x, None, [1] + dims),
+                                start_indices)
+  return c.CrossReplicaSum(padded, replica_groups)
+
+# TODO(mattjj): use more ergonimic form of DynamicUpdateSlice instead!
+def _xla_shard_start_indices(c, axis_size, ndim):
+  idx = c.Rem(c.ReplicaId(), c.Constant(onp.array(axis_size, onp.uint32)))
+  zero = onp.zeros(ndim - 1, onp.uint32)
+  return c.Concatenate([c.Reshape(idx, None, [1]), c.Constant(zero)], 0)
 
 
 ### soft_pmap axis split transformation
@@ -524,6 +551,7 @@ pe.map_primitives.add(xla_pmap_p)
 
 @lu.transformation
 def split_axis(axis_name, chunk_size, *args):
+  assert False, "update it"
   with core.new_master(SplitAxisTrace) as master:
     trace = SplitAxisTrace(master, core.cur_sublevel())
     in_tracers = map(partial(SplitAxisTracer, trace, axis_name), args)
@@ -538,6 +566,7 @@ def split_axis(axis_name, chunk_size, *args):
 
 @lu.transformation_with_aux
 def split_axis_subtrace(master, names, *vals):
+  assert False, "update it"
   trace = SplitAxisTrace(master, core.cur_sublevel())
   ans = yield map(partial(SplitAxisTracer, trace), names, vals), {}
   out_tracer = trace.full_raise(ans)
@@ -572,16 +601,6 @@ class SplitAxisTracer(core.Tracer):
     else:
       return batching.remove_batch_dim_from_aval(0, aval)
 
-  def unpack(self):
-    if self.name is not_mapped:
-      return tuple(self.val)
-    else:
-      if type(self.name) is SplitAxisTuple:
-        names = list(self.name)
-      else:
-        names = [self.name] * len(self.val)
-      return map(partial(SplitAxisTracer, self.trace), names, self.val)
-
   def full_lower(self):
     if self.axis_name is not_mapped:
       return core.full_lower(self.val)
@@ -599,6 +618,7 @@ class SplitAxisTrace(core.Trace):
     return SplitAxisTracer(self, val.axis_name, val.val)
 
   def process_primitive(self, primitive, tracers, params):
+    assert False, "update it"
     vals_in, names_in = unzip2((t.val, t.axis_name) for t in tracers)
     if primitive is axis_index_p:
       dummy, = vals_in
@@ -638,6 +658,7 @@ class SplitAxisTrace(core.Trace):
           return SplitAxisTracer(self, name, val_out)
 
   def process_call(self, call_primitive, f, tracers, params):
+    assert False, "update it"
     if call_primitive in pe.map_primitives:
       return self.process_map(call_primitive, f, tracers, params)
     else:
@@ -650,6 +671,7 @@ class SplitAxisTrace(core.Trace):
         return SplitAxisTracer(self, name_out(), val_out)
 
   def process_map(self, map_primitive, f, tracers, params):
+    assert False, "update it"
     vals, names = unzip2((t.val, t.axis_name) for t in tracers)
     if all(name is not_mapped for name in names):
         return map_primitive.bind(f, *vals, **params)
@@ -671,11 +693,8 @@ class SplitAxisTrace(core.Trace):
       return  SplitAxisTracer(trace, name, x)
     return  val, todo
 
-  def pack(self, tracers):
-    vals, names = unzip2((t.val, t.axis_name) for t in tracers)
-    return SplitAxisTracer(self, SplitAxisTuple(names), core.pack(vals))
-
 def transpose_mapped(src, dst, name, x):
+  assert False, "update it"
   def transpose(name, x):
     if type(name) is SplitAxisTuple:
       return core.pack(map(transpose, name, x))
