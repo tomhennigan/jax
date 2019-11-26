@@ -19,6 +19,8 @@ from __future__ import print_function
 import collections
 from functools import partial
 import itertools
+import re
+from unittest import SkipTest
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -29,10 +31,16 @@ import numpy.random as npr
 from jax import api
 from jax import core
 from jax import lax
+from jax import random
 from jax import test_util as jtu
 from jax.util import unzip2
 from jax.lib import xla_bridge
 import jax.numpy as np  # scan tests use numpy
+import jax.scipy as jsp
+
+from jax.config import config
+config.parse_flags_with_absl()
+
 
 def scan_reference(f, init, xs):
   carry = init
@@ -42,6 +50,10 @@ def scan_reference(f, init, xs):
     ys.append(lax.reshape(y, (1,) + onp.shape(y)))
   ys = lax.concatenate(ys, 0)
   return carry, ys
+
+
+def high_precision_dot(a, b):
+  return lax.dot(a, b, precision=lax.Precision.HIGHEST)
 
 
 class LaxControlFlowTest(jtu.JaxTestCase):
@@ -68,6 +80,17 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     self.assertEqual(cloop(2), limit - 2)
     self.assertEqual(cloop(2), limit - 2)
     self.assertEqual(cloop(3), limit - 3)
+
+  def testWhileWithManyArgs(self):
+    nargs = 256
+
+    def loop_cond(state):
+      return lax.lt(state[0], 2)
+
+    def loop_body(state):
+      return tuple(lax.add(s, 1) for s in state)
+
+    _ = lax.while_loop(loop_cond, loop_body, (0,) * nargs)
 
   def testNestedWhile(self):
 
@@ -168,6 +191,25 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     self.assertEqual(cloop(3, limit, 1), limit - 3)
     assert not effect[0]
 
+  def testWhileTypeErrors(self):
+    """Test typing error messages for while."""
+    with self.assertRaisesRegex(TypeError,
+        re.escape("cond_fun must return a boolean scalar, but got pytree PyTreeDef(tuple, [*,*]).")):
+      lax.while_loop(lambda c: (1., 1.), lambda c: c, 0.)
+    with  self.assertRaisesRegex(TypeError,
+        re.escape("cond_fun must return a boolean scalar, but got output type(s) [ShapedArray(float32[])].")):
+      lax.while_loop(lambda c: np.float32(1.), lambda c: c, np.float32(0.))
+    with self.assertRaisesRegex(TypeError,
+        re.escape("body_fun output and input must have same type structure, got PyTreeDef(tuple, [*,*]) and *.")):
+      lax.while_loop(lambda c: True, lambda c: (1., 1.), 0.)
+    with self.assertRaisesRegex(
+        TypeError,
+        "body_fun output and input must have identical types, got\\n"
+        "ShapedArray\(bool\[\]\)\\n"
+        "and\\n"
+        "ShapedArray\(float32\[\]\)."):
+      lax.while_loop(lambda c: True, lambda c: True, np.float32(0.))
+
   def testNestedWhileWithDynamicUpdateSlice(self):
     num = 5
 
@@ -229,7 +271,7 @@ class LaxControlFlowTest(jtu.JaxTestCase):
       return total
 
     cfun = api.jit(sum_first_n)
-    x = npr.RandomState(0).randn(10)
+    x = npr.RandomState(0).randn(10).astype(np.float_)
 
     for num in [0, 5, 10, 15]:
       self.assertAllClose(sum_first_n(x, num), onp.sum(x[:num]),
@@ -262,7 +304,7 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     def fun(x, y):
       return lax.while_loop(lambda x: x < 3, lambda x: x + y, x)
 
-    ans = api.vmap(fun, in_axes=(None, 0))(0, onp.array([2, 3]))
+    ans = api.vmap(fun, in_axes=(None, 0))(0, np.array([2, 3]))
     expected = onp.array([4, 3])
     self.assertAllClose(ans, expected, check_dtypes=False)
 
@@ -283,6 +325,12 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     expected = (onp.array([4, 3]), onp.array([1, 2]))
     self.assertAllClose(ans, expected, check_dtypes=False)
 
+  def testForiLoopErrors(self):
+    """Test typing error messages for while."""
+    with self.assertRaisesRegex(
+      TypeError, "arguments to fori_loop must have equal types"):
+      lax.fori_loop(np.int16(0), np.int32(10), (lambda i, c: c), np.float32(7))
+
   def testForiLoopBatched(self):
     def body_fun(i, loop_carry):
       x, y = loop_carry
@@ -297,20 +345,25 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     expected = (onp.array([10, 11]), onp.array([20, 20]))
     self.assertAllClose(ans, expected, check_dtypes=False)
 
+  def testForiLoopBatchedIssue1190(self):
+    f = lambda x: lax.fori_loop(0, 4, lambda _, x: x + 1, x)
+    jaxpr = api.make_jaxpr(api.vmap(f))(np.arange(3))
+    eqn = jaxpr.eqns[0]
+    self.assertIs(eqn.primitive, lax.while_p)
+    self.assertEqual(eqn.params['cond_jaxpr'].in_avals[0].shape, ())
+
   def testForiLoopBasic(self):
+    def body_fun(i, tot):
+      return lax.add(tot, i)
+
     def count(num):
-      def body_fun(i, tot):
-        return lax.add(tot, i)
       return lax.fori_loop(0, num, body_fun, 0)
 
-    cfun = api.jit(count)
-
     self.assertEqual(count(2), 1)
-    self.assertEqual(count(2), cfun(2))
     self.assertEqual(count(3), 3)
-    self.assertEqual(count(3), cfun(3))
     self.assertEqual(count(4), 6)
-    self.assertEqual(count(4), cfun(4))
+    for args_maker in [lambda: [2], lambda: [3], lambda: [4]]:
+      self._CompileAndCheck(count, args_maker, True)
 
   def testForiLoopClosure(self):
     def count(num):
@@ -340,7 +393,7 @@ class LaxControlFlowTest(jtu.JaxTestCase):
       return total
 
     cfun = api.jit(sum_first_n)
-    x = npr.RandomState(0).randn(10)
+    x = npr.RandomState(0).randn(10).astype(np.float_)
 
     for num in [0, 5, 10, 15]:
       self.assertAllClose(sum_first_n(x, num), onp.sum(x[:num]),
@@ -360,7 +413,7 @@ class LaxControlFlowTest(jtu.JaxTestCase):
       return out_val['total']
 
     cfun = api.jit(sum_first_n)
-    x = npr.RandomState(0).randn(10)
+    x = npr.RandomState(0).randn(10).astype(np.float_)
 
     for num in [0, 5, 10, 15]:
       self.assertAllClose(sum_first_n(x, num), onp.sum(x[:num]),
@@ -380,7 +433,7 @@ class LaxControlFlowTest(jtu.JaxTestCase):
       return tot
 
     cfun = api.jit(sum_first_n)
-    x = npr.RandomState(0).randn(10)
+    x = npr.RandomState(0).randn(10).astype(np.float_)
 
     for num in [0, 5, 10, 15]:
       self.assertAllClose(sum_first_n(x, num), onp.sum(x[:num]),
@@ -414,6 +467,25 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     self.assertEqual(fun(4), cfun(4))
     self.assertEqual(fun(4), (8, 16))
 
+  def testIssue1379(self):
+
+    def fun(pred):
+      return lax.cond(pred, pred, lambda x: (True, x), pred, lambda x: (False, x))
+
+    @api.jit
+    def cfun(pred):
+      return fun(pred)
+
+    self.assertEqual(fun(0), cfun(0), (False,0))
+    self.assertEqual(fun(0.), cfun(0.), (False,0.))
+    self.assertEqual(fun(1), cfun(1), (True,1))
+    self.assertEqual(fun(1.), cfun(1.), (True,1.))
+
+    # test that proper errors are raised for wrong types
+    for pred in ["abc", [], [1,2]]:
+      for f in [fun, cfun]:
+        self.assertRaises(TypeError, f, pred)
+
   def testNestedCond(self):
     def fun(x):
       if x < 2:
@@ -439,6 +511,35 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     self.assertEqual(cfun(1), fun(1))
     self.assertEqual(cfun(3), fun(3))
     self.assertEqual(cfun(6), fun(6))
+
+  def testCondTypeErrors(self):
+    """Test typing error messages for  cond."""
+    with self.assertRaisesRegex(TypeError,
+        re.escape("Pred type must be either boolean or number, got <function")):
+      lax.cond(lambda x: True,
+               1., lambda top: 1., 2., lambda fop: 2.)
+    with self.assertRaisesRegex(TypeError,
+        re.escape("Pred type must be either boolean or number, got foo.")):
+      lax.cond("foo",
+               1., lambda top: 1., 2., lambda fop: 2.)
+    with self.assertRaisesRegex(TypeError,
+        re.escape("Pred must be a scalar, got (1.0, 1.0) of shape (2,).")):
+      lax.cond((1., 1.),
+               1., lambda top: 1., 2., lambda fop: 2.)
+    with self.assertRaisesRegex(TypeError,
+        re.escape("true_fun and false_fun output must have same type structure, got * and PyTreeDef(tuple, [*,*]).")):
+      lax.cond(True,
+               1., lambda top: 1., 2., lambda fop: (2., 2.))
+    with self.assertRaisesRegex(
+        TypeError,
+        "true_fun and false_fun output must have identical types, got\n"
+        "ShapedArray\(float32\[1\]\)\n"
+        "and\n"
+        "ShapedArray\(float32\[\]\)."):
+      lax.cond(True,
+               1., lambda top: np.array([1.], np.float32),
+               2., lambda fop: np.float32(1.))
+
 
   def testCondOneBranchConstant(self):
     def fun(x):
@@ -474,6 +575,73 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     self.assertEqual(fun(4), cfun(4))
     self.assertEqual(cfun(4), (4, 2., 4.))
 
+  def testCondBatched(self):
+    def fun(x, y, z):
+      pred = lax.lt(x, 3)
+      true_fun = lambda y: y
+      false_fun = lambda z: lax.neg(z)
+      return lax.cond(pred, y, true_fun, z, false_fun)
+
+    # these cases stay as cond
+    x = np.array(2)
+    y = np.array([1, 2])
+    z = np.array([3, 4])
+    ans = api.vmap(fun, (None, 0, 0))(x, y, z)
+    jaxpr = api.make_jaxpr(api.vmap(fun, (None, 0, 0)))(x, y, z)
+    expected = onp.array([1, 2])
+    self.assertAllClose(ans, expected, check_dtypes=False)
+    assert "select" not in str(jaxpr)
+
+    x = np.array(4)
+    ans = api.vmap(fun, (None, 0, 0))(x, y, z)
+    jaxpr = api.make_jaxpr(api.vmap(fun, (None, 0, 0)))(x, y, z)
+    expected = onp.array([-3, -4])
+    self.assertAllClose(ans, expected, check_dtypes=False)
+    assert "select" not in str(jaxpr)
+
+    fun = api.jit(fun)
+    ans = api.vmap(fun, (None, 0, 0))(x, y, z)
+    expected = onp.array([-3, -4])
+    self.assertAllClose(ans, expected, check_dtypes=False)
+
+    z = np.array(5)
+    ans = api.vmap(fun, (None, 0, None))(x, y, z)
+    jaxpr = api.make_jaxpr(api.vmap(fun, (None, 0, None)))(x, y, z)
+    expected = onp.array([-5, -5])
+    self.assertAllClose(ans, expected, check_dtypes=False)
+    assert "select" not in str(jaxpr)
+
+
+    # these cases become select
+    x = np.array([2, 4])
+    ans = api.vmap(fun, (0, 0, None))(x, y, z)
+    jaxpr = api.make_jaxpr(api.vmap(fun, (0, 0, None)))(x, y, z)
+    expected = onp.array([1, -5])
+    self.assertAllClose(ans, expected, check_dtypes=False)
+    assert "select" in str(jaxpr)
+
+    z = np.array([3, 4])
+    ans = api.vmap(fun)(x, y, z)
+    jaxpr = api.make_jaxpr(api.vmap(fun))(x, y, z)
+    expected = onp.array([1, -4])
+    self.assertAllClose(ans, expected, check_dtypes=False)
+    assert "select" in str(jaxpr)
+
+  def testIssue1263(self):
+    def f(rng, x):
+      cond = random.bernoulli(rng)
+      return lax.cond(cond, x, lambda x: x, np.abs(x) - 1., lambda x: x)
+
+    def body_fn(i, state):
+      rng, x = state
+      key, subkey = random.split(rng)
+      return key, f(subkey, x)
+
+    def g(rng, x):
+      return lax.fori_loop(0, 10, body_fn, (rng, x))
+
+    api.vmap(g)(random.split(random.PRNGKey(0), 3), np.ones((3, 4)))
+
   def testIssue514(self):
     # just check this doesn't crash
     lax.cond(True,
@@ -500,11 +668,13 @@ class LaxControlFlowTest(jtu.JaxTestCase):
       for jit_scan in [False, True]
       for jit_f in [False, True])
   def testScanImpl(self, jit_scan, jit_f):
-    d = np.array([1., 2.])
+    rng = onp.random.RandomState(0)
+
+    d = rng.randn(2)
     def f(c, a):
       assert a.shape == (3,)
       assert c.shape == (4,)
-      b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
+      b = np.cos(np.sum(np.sin(a)) + np.sum(np.cos(c)) + np.sum(np.tan(d)))
       c = np.sin(c * b)
       assert b.shape == ()
       return c, b
@@ -516,8 +686,8 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     else:
       scan = lax.scan
 
-    as_ = np.ones((5, 3))
-    c = np.ones(4)
+    as_ = rng.randn(5, 3)
+    c = rng.randn(4)
 
     ans =                scan(f, c, as_)
     expected = scan_reference(f, c, as_)
@@ -529,11 +699,13 @@ class LaxControlFlowTest(jtu.JaxTestCase):
       for jit_scan in [False, True]
       for jit_f in [False, True])
   def testScanJVP(self, jit_scan, jit_f):
-    d = np.array([1., 2.])
+    rng = onp.random.RandomState(0)
+
+    d = rng.randn(2)
     def f(c, a):
       assert a.shape == (3,)
       assert c.shape == (4,)
-      b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
+      b = np.cos(np.sum(np.sin(a)) + np.sum(np.cos(c)) + np.sum(np.tan(d)))
       c = np.sin(c * b)
       assert b.shape == ()
       return c, b
@@ -545,12 +717,15 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     else:
       scan = lax.scan
 
-    as_ = np.ones((5, 3))
-    c = np.ones(4)
+    as_ = rng.randn(5, 3)
+    c = rng.randn(4)
 
-    ans = api.jvp(lambda c, as_:                scan(f, c, as_), (c, as_), (c, as_))[1]
-    expected = api.jvp(lambda c, as_: scan_reference(f, c, as_), (c, as_), (c, as_))[1]
-    self.assertAllClose(ans, expected, check_dtypes=False)
+    ans = api.jvp(lambda c, as_:                scan(f, c, as_), (c, as_), (c, as_))
+    expected = api.jvp(lambda c, as_: scan_reference(f, c, as_), (c, as_), (c, as_))
+    self.assertAllClose(ans, expected, check_dtypes=False,
+                        rtol={onp.float64: 1e-14})
+
+    jtu.check_grads(partial(scan, f), (c, as_), order=2, modes=["fwd"])
 
   @parameterized.named_parameters(
       {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),
@@ -558,11 +733,13 @@ class LaxControlFlowTest(jtu.JaxTestCase):
       for jit_scan in [False, True]
       for jit_f in [False, True])
   def testScanLinearize(self, jit_scan, jit_f):
-    d = np.array([1., 2.])
+    rng = onp.random.RandomState(0)
+
+    d = rng.randn(2)
     def f(c, a):
       assert a.shape == (3,)
       assert c.shape == (4,)
-      b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
+      b = np.cos(np.sum(np.sin(a)) + np.sum(np.cos(c)) + np.sum(np.tan(d)))
       c = np.sin(c * b)
       assert b.shape == ()
       return c, b
@@ -574,12 +751,13 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     else:
       scan = lax.scan
 
-    as_ = np.ones((5, 3))
-    c = np.ones(4)
+    as_ = rng.randn(5, 3)
+    c = rng.randn(4)
 
     ans = api.linearize(lambda c, as_:                scan(f, c, as_), c, as_)[1](c, as_)
     expected = api.linearize(lambda c, as_: scan_reference(f, c, as_), c, as_)[1](c, as_)
-    self.assertAllClose(ans, expected, check_dtypes=False)
+    self.assertAllClose(ans, expected, check_dtypes=False,
+                        rtol={onp.float64: 1e-14})
 
   @parameterized.named_parameters(
       {"testcase_name": "_jit_scan={}_jit_f={}".format(jit_scan, jit_f),
@@ -587,7 +765,9 @@ class LaxControlFlowTest(jtu.JaxTestCase):
       for jit_scan in [False, True]
       for jit_f in [False, True])
   def testScanGrad(self, jit_scan, jit_f):
-    d = np.ones(2)
+    rng = onp.random.RandomState(0)
+
+    d = rng.randn(2)
     def f(c, a):
       assert a.shape == (3,)
       assert c.shape == (4,)
@@ -599,16 +779,20 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     if jit_f:
       f = api.jit(f)
     if jit_scan:
-      scan = api.jit(lax.scan, (0,))
+      scan = api.jit(lax.scan, static_argnums=(0,))
     else:
       scan = lax.scan
 
-    as_ = np.ones((5, 3))
-    c = np.ones(4)
+    as_ = rng.randn(5, 3)
+    c = rng.randn(4)
 
     ans = api.grad(lambda c, as_:      list(          scan(f, c, as_))[0].sum())(c, as_)
     expected = api.grad(lambda c, as_: list(scan_reference(f, c, as_))[0].sum())(c, as_)
-    self.assertAllClose(ans, expected, check_dtypes=False)
+    self.assertAllClose(ans, expected, check_dtypes=False,
+                        rtol={onp.float32: 2e-5, onp.float64: 1e-13})
+
+    jtu.check_grads(partial(scan, f), (c, as_), order=2, modes=["rev"],
+                    atol=1e-3, rtol=2e-3)
 
   def testScanRnn(self):
     r = npr.RandomState(0)
@@ -618,12 +802,12 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     n_out = 1
     length = 3
 
-    W_trans = r.randn(n_hid, n_hid + n_in)
-    W_out = r.randn(n_out, n_hid + n_in)
+    W_trans = r.randn(n_hid, n_hid + n_in).astype(np.float_)
+    W_out = r.randn(n_out, n_hid + n_in).astype(np.float_)
     params = W_trans, W_out
 
-    inputs = r.randn(length, n_in)
-    targets = r.randn(length, n_out)
+    inputs = r.randn(length, n_in).astype(np.float_)
+    targets = r.randn(length, n_out).astype(np.float_)
 
     def step(params, state, input):
       W_trans, W_out = params
@@ -647,21 +831,32 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     # jvp evaluation doesn't crash
     api.jvp(lambda params: loss(params, inputs, targets), (params,), (params,))
 
+    # jvp numerical check passes
+    jtu.check_grads(loss, (params, inputs, targets), order=2, modes=["fwd"],
+                    rtol={onp.float32: 2e-2, onp.float64: 1e-6})
+
+    # linearize works
+    _, expected = api.jvp(loss, (params, inputs, targets),
+                          (params, inputs, targets))
+    _, linfun = api.linearize(loss, params, inputs, targets)
+    ans = linfun(params, inputs, targets)
+    self.assertAllClose(ans, expected, check_dtypes=False)
+
     # gradient evaluation doesn't crash
     api.grad(loss)(params, inputs, targets)
 
     # gradient check passes
-    jtu.check_grads(loss, (params, inputs, targets), order=1)
+    jtu.check_grads(loss, (params, inputs, targets), order=2, rtol=2e-2)
 
     # we can vmap to batch things
     batch_size = 7
-    batched_inputs = r.randn(batch_size, length, n_in)
-    batched_targets = r.randn(batch_size, length, n_out)
+    batched_inputs = r.randn(batch_size, length, n_in).astype(np.float_)
+    batched_targets = r.randn(batch_size, length, n_out).astype(np.float_)
     batched_loss = api.vmap(lambda x, y: loss(params, x, y))
     losses = batched_loss(batched_inputs, batched_targets)
     expected = onp.stack(list(map(lambda x, y: loss(params, x, y),
                                   batched_inputs, batched_targets)))
-    self.assertAllClose(losses, expected, check_dtypes=False)
+    self.assertAllClose(losses, expected, check_dtypes=False, rtol=1e-2)
 
   def testIssue711(self):
     # Tests reverse-mode differentiation through a scan for which the scanned
@@ -701,10 +896,36 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     def plus_one(p, iter_idx):
       return Point(p.x+1, p.y+1), iter_idx
 
-    self.assertRaisesRegexp(
+    self.assertRaisesRegex(
         ValueError,
         'scan got value with no leading axis to scan over.*',
         lambda: lax.scan(plus_one, p0, list(range(5))))
+
+  def testScanTypeErrors(self):
+    """Test typing error messages for scan."""
+    a = np.arange(5)
+    # Body output not a tuple
+    with self.assertRaisesRegex(TypeError,
+        re.escape("scan body output must be a pair, got ShapedArray(float32[]).")):
+      lax.scan(lambda c, x: np.float32(0.), 0, a)
+    with  self.assertRaisesRegex(TypeError,
+        re.escape("scan carry output and input must have same type structure, "
+                  "got PyTreeDef(tuple, [*,*,*]) and PyTreeDef(tuple, [*,PyTreeDef(tuple, [*,*])])")):
+      lax.scan(lambda c, x: ((0, 0, 0), x), (1, (2, 3)), a)
+    with self.assertRaisesRegex(TypeError,
+        re.escape("scan carry output and input must have same type structure, got * and PyTreeDef(None, []).")):
+      lax.scan(lambda c, x: (0, x), None, a)
+    with self.assertRaisesRegex(
+        TypeError,
+        "scan carry output and input must have identical types, got\n"
+        "ShapedArray\(int32\[\]\)\\n"
+        "and\\n"
+        "ShapedArray\(float32\[\]\)."):
+      lax.scan(lambda c, x: (np.int32(0), x), np.float32(1.0), a)
+    with self.assertRaisesRegex(TypeError,
+        re.escape("scan carry output and input must have same type structure, got * and PyTreeDef(tuple, [*,*]).")):
+      lax.scan(lambda c, x: (0, x), (1, 2), np.arange(5))
+
 
   def testScanHigherOrderDifferentiation(self):
     d = 0.75
@@ -717,7 +938,7 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     c = 1.
 
     jtu.check_grads(lambda c, as_: lax.scan(f, c, as_), (c, as_),
-                    modes=["fwd", "rev"], order=2)
+                    modes=["rev"], order=2, rtol={onp.float32: 6e-3})
 
   @parameterized.named_parameters(
       {"testcase_name": "_jit_scan={}_jit_f={}_in_axes={}".format(
@@ -728,11 +949,13 @@ class LaxControlFlowTest(jtu.JaxTestCase):
       for in_axes in itertools.product([None, 0, 1], [None, 0, 1, 2])
       if in_axes != (None, None))
   def testScanVmap(self, jit_scan, jit_f, in_axes):
-    d = np.array([1., 2.])
+    rng = onp.random.RandomState(0)
+
+    d = rng.randn(2)
     def f(c, a):
       assert a.shape == (3,)
       assert c.shape == (4,)
-      b = np.sum(np.sin(a)) + np.sum(np.sin(c)) + np.sum(np.sin(d))
+      b = np.cos(np.sum(np.sin(a)) + np.sum(np.cos(c)) + np.sum(np.tan(d)))
       c = np.sin(c * b)
       assert b.shape == ()
       return c, b
@@ -753,9 +976,8 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     if as_bdim is not None:
       as_shape.insert(as_bdim, 7)
 
-    r = onp.random.RandomState(0)
-    as_ = r.randn(*as_shape)
-    c = r.randn(*c_shape)
+    as_ = rng.randn(*as_shape)
+    c = rng.randn(*c_shape)
 
     ans = api.vmap(lambda c, as_:                scan(f, c, as_), in_axes)(c, as_)
     expected = api.vmap(lambda c, as_: scan_reference(f, c, as_), in_axes)(c, as_)
@@ -787,6 +1009,22 @@ class LaxControlFlowTest(jtu.JaxTestCase):
 
     ans = api.vmap(lambda c, as_:            lax.scan(f, c, as_), in_axes)(c, as_)
     self.assertAllClose(ans, expected, check_dtypes=False)
+
+  def testScanVmapFixpoint(self):
+    def f(carry_init):
+      def scan_body(c, x):
+        # The carry is a 4-tuple, the last element starts batched,
+        # and the carry is shifted left at each iteration.
+        return ((c[1], c[2], c[3], 0.), None)
+      return lax.scan(scan_body, (0., 1., 2., carry_init), np.zeros(2))
+    carry_init = np.array([3., 4., 5.])
+    carry_out, _ = api.vmap(f)(carry_init)
+    self.assertAllClose(carry_out[3], np.array([0., 0., 0.]), check_dtypes=False)
+    self.assertAllClose(carry_out[2], np.array([0., 0., 0.]), check_dtypes = False)
+    # After two shifts, we get the carry_init
+    self.assertAllClose(carry_out[1], carry_init, check_dtypes=False)
+    self.assertAllClose(carry_out[0], np.array([2., 2., 2.]), check_dtypes = False)
+
 
   # TODO(mattjj, dougalm): fix this test when skip_checks is False
   def testIssue757(self):
@@ -822,6 +1060,391 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     expected = xs ** 2
     actual = lax.map(f, xs)
     self.assertAllClose(actual, expected, check_dtypes=True)
+
+  def testCaching(self):
+    def cond(x):
+      assert python_should_be_executing
+      return x < 5
+
+    def body(x):
+      assert python_should_be_executing
+      return x + 2
+
+    python_should_be_executing = True
+    lax.while_loop(cond, body, 0)
+
+    python_should_be_executing = False
+    lax.while_loop(cond, body, 0)
+
+  def testCaching2(self):
+    # This second caching test shows a different kind of caching that we haven't
+    # implemented (but could!), namely that Python functions that are distinct
+    # objects but are equivalent functions trigger cache hits. This kind of
+    # caching could be salient when using lambda functions with control flow:
+    #
+    #   lax.while_loop(lambda x: x < 5, lambda x: x + 2, 0)
+    #   lax.while_loop(lambda x: x < 5, lambda x: x + 2, 0)
+    #
+    # To get a cache hit on the second line we'd need to form a jaxpr and
+    # compare them for equality (including the literals on identity). We could
+    # implement that by adding a __hash__/__eq__ to core.Jaxpr and
+    # core.TypedJaxpr (see #1221).
+    raise SkipTest("not implemented")
+
+    def cond(x):
+      assert python_should_be_executing
+      return x < 5
+
+    def body(x):
+      assert python_should_be_executing
+      return x + 2
+
+    python_should_be_executing = True
+    lax.while_loop(cond, body, 0)
+
+    def cond(x):
+      assert python_should_be_executing
+      return x < 5
+
+    def body(x):
+      assert python_should_be_executing
+      return x + 2
+
+    python_should_be_executing = False
+    lax.while_loop(cond, body, 0)
+
+  def testWhileCondConstant(self):
+    out = lax.while_loop(lambda _: False, lambda _: (), ())  # doesn't crash
+    self.assertEqual(out, ())
+
+  def testIssue1316(self):
+    def f(carry, _):
+      c, key = carry
+      key, _ = random.split(key)
+      return (c, key), ()
+
+    key = random.PRNGKey(0)
+    api.grad(lambda c: lax.scan(f, (c, key), onp.ones(3))[0][0])(0.)  # doesn't crash
+
+  def testIssue1361(self):
+    @api.jit
+    def jit_run_scan(x):
+      def fun(carry, _):
+        x, _ = carry
+        return (2 * x, 0.), None
+      (x, _), _ = lax.scan(fun, (x, 0.), np.arange(3))
+      return x
+
+    api.grad(lambda x: jit_run_scan(x))(0.)  # doesn't crash
+
+  def test_custom_root_scalar(self):
+
+    # TODO(shoyer): Figure out why this fails and re-enable it, if possible. My
+    # best guess is that TPUs use less stable numerics for pow().
+    if jtu.device_under_test() == "tpu":
+      raise SkipTest("Test fails on TPU")
+
+    def scalar_solve(f, y):
+      return y / f(1.0)
+
+    def binary_search(func, x0, low=0.0, high=100.0, tolerance=1e-6):
+      del x0  # unused
+
+      def cond(state):
+        low, high = state
+        return high - low > tolerance
+
+      def body(state):
+        low, high = state
+        midpoint = 0.5 * (low + high)
+        update_upper = func(midpoint) > 0
+        low = np.where(update_upper, low, midpoint)
+        high = np.where(update_upper, midpoint, high)
+        return (low, high)
+
+      solution, _ = lax.while_loop(cond, body, (low, high))
+      return solution
+
+    def sqrt_cubed(x, tangent_solve=scalar_solve):
+      f = lambda y: y ** 2. - np.array(x) ** 3.
+      return lax.custom_root(f, 0.0, binary_search, tangent_solve)
+
+    value, grad = api.value_and_grad(sqrt_cubed)(5.0)
+    self.assertAllClose(value, 5 ** 1.5, check_dtypes=False, rtol=1e-6)
+    self.assertAllClose(grad, api.grad(pow)(5.0, 1.5), check_dtypes=False,
+                        rtol=1e-7)
+    jtu.check_grads(sqrt_cubed, (5.0,), order=2, rtol=1e-3)
+
+    # TODO(shoyer): reenable when batching works
+    # inputs = np.array([4.0, 5.0])
+    # results = api.vmap(sqrt_cubed)(inputs)
+    # self.assertAllClose(results, inputs ** 1.5, check_dtypes=False)
+
+    results = api.jit(sqrt_cubed)(5.0)
+    self.assertAllClose(results, 5.0 ** 1.5, check_dtypes=False,
+                        rtol={onp.float64:1e-7})
+
+  def test_custom_root_vector_with_solve_closure(self):
+
+    def vector_solve(f, y):
+      return np.linalg.solve(api.jacobian(f)(y), y)
+
+    def linear_solve(a, b):
+      f = lambda y: high_precision_dot(a, y) - b
+      x0 = np.zeros_like(b)
+      solution = np.linalg.solve(a, b)
+      oracle = lambda func, x0: solution
+      return lax.custom_root(f, x0, oracle, vector_solve)
+
+    rng = onp.random.RandomState(0)
+    a = rng.randn(2, 2)
+    b = rng.randn(2)
+    jtu.check_grads(linear_solve, (a, b), order=2,
+                    atol={onp.float32: 1e-2, onp.float64: 1e-11})
+
+    actual = api.jit(linear_solve)(a, b)
+    expected = np.linalg.solve(a, b)
+    self.assertAllClose(expected, actual, check_dtypes=True)
+
+  def test_custom_root_with_custom_linear_solve(self):
+
+    # TODO(shoyer): Figure out why this fails and re-enable it.
+    if jtu.device_under_test() == "tpu":
+      raise SkipTest("Test fails on TPU")
+
+    def linear_solve(a, b):
+      f = lambda x: np.dot(a, x) - b
+      factors = jsp.linalg.cho_factor(a)
+      cho_solve = lambda f, b: jsp.linalg.cho_solve(factors, b)
+      def pos_def_solve(g, b):
+        return lax.custom_linear_solve(g, b, cho_solve, symmetric=True)
+      return lax.custom_root(f, b, cho_solve, pos_def_solve)
+
+    rng = onp.random.RandomState(0)
+    a = rng.randn(2, 2)
+    b = rng.randn(2)
+
+    actual = linear_solve(np.dot(a, a.T), b)
+    expected = np.linalg.solve(np.dot(a, a.T), b)
+    self.assertAllClose(expected, actual, check_dtypes=True)
+
+    actual = api.jit(linear_solve)(np.dot(a, a.T), b)
+    expected = np.linalg.solve(np.dot(a, a.T), b)
+    self.assertAllClose(expected, actual, check_dtypes=True)
+
+    jtu.check_grads(lambda x, y: linear_solve(np.dot(x, x.T), y),
+                    (a, b), order=2)
+
+  def test_custom_root_errors(self):
+    with self.assertRaisesRegex(TypeError, re.escape("f() output pytree")):
+      lax.custom_root(lambda x: (x, x), 0.0, lambda f, x: x, lambda f, x: x)
+    with self.assertRaisesRegex(TypeError, re.escape("solve() output pytree")):
+      lax.custom_root(lambda x: x, 0.0, lambda f, x: (x, x), lambda f, x: x)
+
+    def dummy_root_usage(x):
+      f = lambda y: x - y
+      return lax.custom_root(f, 0.0, lambda f, x: x, lambda f, x: (x, x))
+
+    with self.assertRaisesRegex(
+        TypeError, re.escape("tangent_solve() output pytree")):
+      api.jvp(dummy_root_usage, (0.0,), (0.0,))
+
+  @parameterized.named_parameters(
+      {"testcase_name": "nonsymmetric", "symmetric": False},
+      {"testcase_name": "symmetric", "symmetric": True},
+  )
+  def test_custom_linear_solve(self, symmetric):
+
+    def explicit_jacobian_solve(matvec, b):
+      return lax.stop_gradient(np.linalg.solve(api.jacobian(matvec)(b), b))
+
+    def matrix_free_solve(matvec, b):
+      return lax.custom_linear_solve(
+          matvec, b, explicit_jacobian_solve, explicit_jacobian_solve,
+          symmetric=symmetric)
+
+    def linear_solve(a, b):
+      return matrix_free_solve(partial(high_precision_dot, a), b)
+
+    rng = onp.random.RandomState(0)
+    a = rng.randn(3, 3)
+    if symmetric:
+      a = a + a.T
+    b = rng.randn(3)
+    jtu.check_grads(linear_solve, (a, b), order=2, rtol=2e-3)
+
+    expected = np.linalg.solve(a, b)
+    actual = api.jit(linear_solve)(a, b)
+    self.assertAllClose(expected, actual, check_dtypes=True)
+
+    # TODO(shoyer): reenable when batching works
+    # c = rng.randn(3, 2)
+    # expected = np.linalg.solve(a, c)
+    # actual = api.vmap(linear_solve, (None, 1), 1)(a, c)
+    # self.assertAllClose(expected, actual, check_dtypes=True)
+
+  def test_custom_linear_solve_zeros(self):
+    def explicit_jacobian_solve(matvec, b):
+      return lax.stop_gradient(np.linalg.solve(api.jacobian(matvec)(b), b))
+
+    def matrix_free_solve(matvec, b):
+      return lax.custom_linear_solve(matvec, b, explicit_jacobian_solve,
+                                     explicit_jacobian_solve)
+
+    def linear_solve(a, b):
+      return matrix_free_solve(partial(high_precision_dot, a), b)
+
+    rng = onp.random.RandomState(0)
+    a = rng.randn(3, 3)
+    b = rng.randn(3)
+    jtu.check_grads(lambda x: linear_solve(x, b), (a,), order=2,
+                    rtol={onp.float32: 5e-3})
+    jtu.check_grads(lambda x: linear_solve(a, x), (b,), order=2,
+                    rtol={onp.float32: 5e-3})
+
+  def test_custom_linear_solve_iterative(self):
+
+    def richardson_iteration(matvec, b, omega=0.1, tolerance=1e-6):
+      # Equivalent to vanilla gradient descent:
+      # https://en.wikipedia.org/wiki/Modified_Richardson_iteration
+      def cond(x):
+        return np.linalg.norm(matvec(x) - b) > tolerance
+      def body(x):
+        return x + omega * (b - matvec(x))
+      return lax.while_loop(cond, body, b)
+
+    def matrix_free_solve(matvec, b):
+      return lax.custom_linear_solve(matvec, b, richardson_iteration,
+                                     richardson_iteration)
+
+    def build_and_solve(a, b):
+      # intentionally non-linear in a and b
+      matvec = partial(high_precision_dot, np.exp(a))
+      return matrix_free_solve(matvec, np.cos(b))
+
+    rng = onp.random.RandomState(0)
+    a = rng.randn(2, 2)
+    b = rng.randn(2)
+    expected = np.linalg.solve(np.exp(a), np.cos(b))
+    actual = build_and_solve(a, b)
+    self.assertAllClose(expected, actual, atol=1e-5, check_dtypes=True)
+    jtu.check_grads(build_and_solve, (a, b), atol=1e-5, order=2, rtol=2e-3)
+
+    # TODO(shoyer): reenable when batching works
+    # a2 = rng.randn(1, 2, 2)
+    # b2 = rng.randn(1, 2, 2)
+    # jtu.check_grads(api.vmap(build_and_solve), (a2, b2), atol=1e-5, order=2)
+
+  def test_custom_linear_solve_cholesky(self):
+
+    def positive_definite_solve(a, b):
+      factors = jsp.linalg.cho_factor(a)
+      def solve(matvec, x):
+        return jsp.linalg.cho_solve(factors, x)
+      matvec = partial(high_precision_dot, a)
+      return lax.custom_linear_solve(matvec, b, solve, symmetric=True)
+
+    rng = onp.random.RandomState(0)
+    a = rng.randn(2, 2)
+    b = rng.randn(2)
+
+    expected = np.linalg.solve(high_precision_dot(a, a.T), b)
+    actual = positive_definite_solve(high_precision_dot(a, a.T), b)
+    self.assertAllClose(expected, actual, check_dtypes=True)
+
+    actual = api.jit(positive_definite_solve)(high_precision_dot(a, a.T), b)
+    self.assertAllClose(expected, actual, check_dtypes=True)
+
+    # numerical gradients are only well defined if ``a`` is guaranteed to be
+    # positive definite.
+    jtu.check_grads(
+        lambda x, y: positive_definite_solve(high_precision_dot(x, x.T), y),
+        (a, b), order=2, rtol=1e-2)
+
+  def test_custom_linear_solve_lu(self):
+
+    # TODO(b/143528110): re-enable when underlying XLA TPU issue is fixed
+    if jtu.device_under_test() == "tpu":
+      raise SkipTest("Test fails on TPU")
+
+    def linear_solve(a, b):
+      a_factors = jsp.linalg.lu_factor(a)
+      at_factors = jsp.linalg.lu_factor(a.T)
+      def solve(matvec, x):
+        return jsp.linalg.lu_solve(a_factors, x)
+      def transpose_solve(vecmat, x):
+        return jsp.linalg.lu_solve(at_factors, x)
+      return lax.custom_linear_solve(
+          partial(high_precision_dot, a), b, solve, transpose_solve)
+
+    rng = onp.random.RandomState(0)
+    a = rng.randn(3, 3)
+    b = rng.randn(3)
+
+    expected = np.linalg.solve(a, b)
+    actual = linear_solve(a, b)
+    self.assertAllClose(expected, actual, check_dtypes=True)
+
+    jtu.check_grads(linear_solve, (a, b), order=2, rtol=2e-3)
+
+    # regression test for https://github.com/google/jax/issues/1536
+    jtu.check_grads(api.jit(linear_solve), (a, b), order=2,
+                    rtol={onp.float32: 2e-3})
+
+  def test_custom_linear_solve_without_transpose_solve(self):
+
+    def explicit_jacobian_solve(matvec, b):
+      return lax.stop_gradient(np.linalg.solve(api.jacobian(matvec)(b), b))
+
+    def loss(a, b):
+      matvec = partial(high_precision_dot, a)
+      x = lax.custom_linear_solve(matvec, b, explicit_jacobian_solve)
+      return np.sum(x)
+
+    rng = onp.random.RandomState(0)
+    a = rng.randn(2, 2)
+    b = rng.randn(2)
+
+    jtu.check_grads(loss, (a, b), order=2, modes=['fwd'],
+                    atol={onp.float32: 2e-3, onp.float64: 1e-11})
+
+    with self.assertRaisesRegex(TypeError, "transpose_solve required"):
+      api.grad(loss)(a, b)
+
+  def test_custom_linear_solve_errors(self):
+
+    solve = lambda f, x: x
+
+    with self.assertRaisesRegex(TypeError, re.escape("matvec() output pytree")):
+      lax.custom_linear_solve(lambda x: [x], 1.0, solve, solve)
+    with self.assertRaisesRegex(TypeError, re.escape("solve() output pytree")):
+      lax.custom_linear_solve(lambda x: x, 1.0, lambda f, x: [x], solve)
+    with self.assertRaisesRegex(
+        TypeError, re.escape("transpose_solve() output pytree")):
+      lax.custom_linear_solve(lambda x: x, 1.0, solve, lambda f, x: [x])
+
+    with self.assertRaisesRegex(ValueError, re.escape("solve() output shapes")):
+      lax.custom_linear_solve(lambda x: x, 1.0, lambda f, x: np.ones(2), solve)
+
+    def bad_matvec_usage(a):
+      return lax.custom_linear_solve(
+          lambda x: a * np.ones(2), 1.0, solve, solve)
+    with self.assertRaisesRegex(ValueError, re.escape("matvec() output shapes")):
+      api.jvp(bad_matvec_usage, (1.0,), (1.0,))
+
+  def testIssue810(self):
+    def loss(A):
+      def step(x, i):
+        return np.matmul(A, x), None
+      init_x = np.zeros(A.shape[-1:])
+      last_x, _ = lax.scan(step, init_x, np.arange(10))
+      return np.sum(last_x)
+
+    A = np.zeros((3, 3))
+    # The second DUS was unnecessarily replicating A across time.
+    # We check XLA because _scan_impl is "underneath" the jaxpr language.
+    s = str(api.xla_computation(api.grad(loss))(A).GetHloText())
+    assert s.count("dynamic-update-slice(") < 2
 
 
 if __name__ == '__main__':

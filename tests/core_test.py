@@ -16,8 +16,9 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import operator
 from collections import namedtuple
+import gc
+import operator
 from unittest import skip
 
 import numpy as onp
@@ -76,8 +77,8 @@ def fun_with_nested_calls_2(x):
       q = call(lambda x: y, x)
       q = q + call(lambda: y)
       q = q + call(lambda y: w + y, y)
-      return call(lambda w: call(np.sin, x) * y, 1.0) + q
-      # return call(lambda w: call(error(np.sin), x) * y, 1.0) + q
+      q = call(lambda w: call(np.sin, x) * y, 1.0) + q
+      return q
     p, t = jvp(baz, (x + 1.0,), (y,))
     return t + (x * p)
   return call(bar, x)
@@ -106,19 +107,19 @@ def product_io_fun(x, y):
 
 
 R = onp.random.randn
-TestSpec = namedtuple('TestSpec', ['fun', 'args'])
+CallSpec = namedtuple('CallSpec', ['fun', 'args'])
 test_specs_base = [
-    TestSpec(simple_fun, (R(3, 2), R(3, 2))),
-    TestSpec(simple_fun_fanout, (R(3, 2), R(3, 2))),
-    TestSpec(product_io_fun, ({'a': R(2, 2), 'b': R(2, 2)},
+    CallSpec(simple_fun, (R(3, 2), R(3, 2))),
+    CallSpec(simple_fun_fanout, (R(3, 2), R(3, 2))),
+    CallSpec(product_io_fun, ({'a': R(2, 2), 'b': R(2, 2)},
                               (R(2, 2), (R(2, 2), R(2, 2))))),
-    TestSpec(fun_with_call, (R(3, 2),)),
-    TestSpec(fun_with_two_calls, (R(3, 2),)),
-    TestSpec(fun_with_call_closure, (R(3, 2),)),
-    TestSpec(fun_call_jitted, (R(1,),)),
-    TestSpec(fun_with_nested_calls, (R(),)),
-    TestSpec(fun_with_nested_calls, (R(3, 2),)),
-    TestSpec(fun_with_nested_calls_2, (R(1, 2),)),
+    CallSpec(fun_with_call, (R(3, 2),)),
+    CallSpec(fun_with_two_calls, (R(3, 2),)),
+    CallSpec(fun_with_call_closure, (R(3, 2),)),
+    CallSpec(fun_call_jitted, (R(1,),)),
+    CallSpec(fun_with_nested_calls, (R(),)),
+    CallSpec(fun_with_nested_calls, (R(3, 2),)),
+    CallSpec(fun_with_nested_calls_2, (R(1, 2),)),
 ]
 
 def jvp_unlinearized(f, primals, tangents):
@@ -128,10 +129,10 @@ def jvp_unlinearized(f, primals, tangents):
 test_specs = []
 for ts in test_specs_base:
   test_specs.append(ts)
-  test_specs.append(TestSpec(partial(jvp, ts.fun), (ts.args, ts.args)))
-  test_specs.append(TestSpec(jit(ts.fun), ts.args))
-  test_specs.append(TestSpec(jit(jit(ts.fun)), ts.args))
-  test_specs.append(TestSpec(partial(jvp_unlinearized, ts.fun),
+  test_specs.append(CallSpec(partial(jvp, ts.fun), (ts.args, ts.args)))
+  test_specs.append(CallSpec(jit(ts.fun), ts.args))
+  test_specs.append(CallSpec(jit(jit(ts.fun)), ts.args))
+  test_specs.append(CallSpec(partial(jvp_unlinearized, ts.fun),
                              (ts.args, ts.args)))
 
 
@@ -141,37 +142,8 @@ def fwd_deriv(f):
 
   return df
 
-def check_trace_eval(f, pvals, vals, expected_out_pval):
-  jaxpr, consts, out_pval, _ = api.trace_to_jaxpr(f, pvals)
-  assert expected_out_pval == out_pval, (expected_out_pval, out_pval)
-  output_traced = core.eval_jaxpr(jaxpr, consts, (), *vals)
-  output_traced = pe.merge_pvals(output_traced, out_pval)
-  output_eval = f(*vals)
-  assert onp.allclose(output_traced, output_eval), \
-      '\neval:         {}\ntrace + eval: {}'.format(output_eval, output_traced)
-
 
 class CoreTest(jtu.JaxTestCase):
-
-  def test_pack_unpack(self):
-    # TODO(dougalm): figure out what jaxpr-tracing api to expose and re-enable
-    self.skipTest("disabled")
-    y = onp.array(1.0)
-    def foo(x):
-      x1, y1 = core.pack((x, y))
-      assert y1 is y, (y1, y)
-      return x1
-
-    pe.trace_to_jaxpr(foo, (_,))
-
-  def test_tup_add(self):
-    # TODO(mattjj,dougalm): put tup_add somewhere (was in array_type.py)
-    self.skipTest("disabled")
-    y = onp.array(1.0)
-    def foo(x):
-      return np.tup_add(core.pack((x, y)))
-
-    pe.trace_to_jaxpr(foo, (_,))
 
   def test_tree_multimap(self):
     xs = ({'a': 1}, [2, 3])
@@ -187,12 +159,6 @@ class CoreTest(jtu.JaxTestCase):
     except (TypeError, ValueError):
       pass
 
-  def test_print_jaxpr_compound(self):
-    # TODO(dougalm): figure out what jaxpr-tracing api to expose and re-enable
-    self.skipTest("disabled")
-    pv = pe.PartialVal((ShapedArray((2, 3), onp.float32), core.unit))
-    print(pe.trace_to_jaxpr(fun_with_call_closure, (pv,))[0])
-
   def test_tree_flatten(self):
     flat, _ = tree_flatten(({'a': 1}, [2, 3], 4))
     assert flat == [1, 2, 3, 4]
@@ -207,60 +173,30 @@ class CoreTest(jtu.JaxTestCase):
 
   @parameterized.parameters(test_specs)
   def test_jit(self, f, args):
-    jtu.check_eq(jit(f)(*args), f(*args))
+    jtu.check_close(jit(f)(*args), f(*args))
 
   @parameterized.parameters(test_specs)
   def test_jvp(self, f, args):
-    jtu.check_jvp(f, partial(jvp, f), args)
+    jtu.check_jvp(f, partial(jvp, f), args, rtol={onp.float32: 3e-2})
 
   def test_jvp_zeros(self):
     def foo(x):
       def bar(y):
-        x1, y1 = core.pack((x, y))
-        return np.sin(x1 * y1)
+        return np.sin(x * y)
       return jvp(bar, (3 * x,), (2 * x,))
 
     jtu.check_eq(jit(foo)(0.5), foo(0.5))
 
-  def test_dynamic_subfun_context(self):
-    def foo(x):
-      def bar(y):
-        return np.multiply(np.sin(x), y)
-      return call(bar, x)
-
-    api.trace_to_jaxpr(foo, (__,))
-
-  def test_nested_grad(self):
-    self.skipTest("disabled")  # TODO: re-enable this test.
-    def foo(x):
-      print(type(x), x)
-      def bar(y):
-        return np.cos(y) * x
-      print(x * x)
-      return call(bar, x*x)
-
-    print(api.trace_to_jaxpr(api.grad(foo), (__,)))
-
-  def test_nested(self):
-    def foo(x):
-      def bar(y):
-        def baz(w):
-          q = call(lambda x: y, x) + call(lambda: y)
-          return call(lambda w: call(np.sin, x) * y, 1.0) + q
-        p, t = jvp(baz, (x + 1.0,), (y,))
-        return t + (x * p)
-
-      return call(bar, x)
-
-    api.trace_to_jaxpr(foo, (__,))
-
   @parameterized.parameters(test_specs)
   def test_jvp_linearized(self, f, args):
-    jtu.check_jvp(f, partial(jvp_unlinearized, f), args)
+    jtu.check_jvp(f, partial(jvp_unlinearized, f), args,
+                  rtol={onp.float32: 3e-2})
 
   @parameterized.parameters(test_specs)
   def test_vjp(self, f, args):
-    jtu.check_vjp(f, partial(vjp, f), args)
+    jtu.check_vjp(f, partial(vjp, f), args,
+                  rtol={onp.float32: 7e-2, onp.float64: 1e-5},
+                  atol={onp.float32: 1e-2, onp.float64: 1e-5})
 
   def test_jvp_closure(self):
     def foo(x):
@@ -277,17 +213,6 @@ class CoreTest(jtu.JaxTestCase):
         return x + y
       return bar(0.0)
     assert jvp(foo, (1.0,), (2.0,)) == (1.0, 2.0)
-
-  def test_simple_trace(self):
-    def foo(x):
-      return np.sin(x) + np.cos(x)
-    pval = pe.PartialVal((ShapedArray((3, 2), onp.float32), core.unit))
-    check_trace_eval(foo, (pval,), (onp.random.randn(3, 2),), pval)
-
-  def test_nullary_trace(self):
-    def foo():
-      return 1.2
-    check_trace_eval(foo, (), (), (None, 1.2))
 
   def test_simple_jit(self):
     def foo(x):
@@ -333,6 +258,23 @@ class CoreTest(jtu.JaxTestCase):
     assert d_sin(0.0) == 1.0
     assert d2_sin(0.0) == 0.0
     assert d3_sin(0.0) == -1.0
+
+  def test_reference_cycles(self):
+    gc.collect()
+
+    def f(x):
+      return x.sum()
+
+    fn = partial(linearize, f)
+    params = np.zeros([])
+
+    debug = gc.get_debug()
+    try:
+      fn(params)
+      gc.set_debug(gc.DEBUG_SAVEALL)
+      self.assertEqual(gc.collect(), 0)
+    finally:
+      gc.set_debug(debug)
 
 
 if __name__ == '__main__':

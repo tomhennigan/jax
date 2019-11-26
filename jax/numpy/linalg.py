@@ -24,11 +24,12 @@ import warnings
 from jax import jit
 from .. import lax
 from .. import lax_linalg
+from .. import dtypes
 from .lax_numpy import _not_implemented
 from .lax_numpy import _wraps
 from . import lax_numpy as np
+from ..api import custom_transforms, defjvp
 from ..util import get_module_functions
-from ..lib import xla_bridge
 
 
 _T = lambda x: np.swapaxes(x, -1, -2)
@@ -37,9 +38,9 @@ _T = lambda x: np.swapaxes(x, -1, -2)
 def _promote_arg_dtypes(*args):
   """Promotes `args` to a common inexact type."""
   def _to_inexact_type(type):
-    return type if np.issubdtype(type, np.inexact) else np.float64
+    return type if np.issubdtype(type, np.inexact) else np.float_
   inexact_types = [_to_inexact_type(np._dtype(arg)) for arg in args]
-  dtype = xla_bridge.canonicalize_dtype(np.result_type(*inexact_types))
+  dtype = dtypes.canonicalize_dtype(np.result_type(*inexact_types))
   args = [lax.convert_element_type(arg, dtype) for arg in args]
   if len(args) == 1:
     return args[0]
@@ -59,7 +60,16 @@ def svd(a, full_matrices=True, compute_uv=True):
   return lax_linalg.svd(a, full_matrices, compute_uv)
 
 
+# TODO(pfau): make this work for complex types
+def _jvp_slogdet(g, ans, x):
+  jvp_sign = np.zeros(x.shape[:-2])
+  jvp_logdet = np.trace(solve(x, g), axis1=-1, axis2=-2)
+  return jvp_sign, jvp_logdet
+
+
 @_wraps(onp.linalg.slogdet)
+@custom_transforms
+@jit
 def slogdet(a):
   a = _promote_arg_dtypes(np.asarray(a))
   dtype = lax.dtype(a)
@@ -72,10 +82,10 @@ def slogdet(a):
   is_zero = np.any(diag == np.array(0, dtype=dtype), axis=-1)
   parity = np.count_nonzero(pivot != np.arange(a_shape[-1]), axis=-1)
   if np.iscomplexobj(a):
-    sign = np.prod(diag / np.abs(diag))
+    sign = np.prod(diag / np.abs(diag), axis=-1)
   else:
     sign = np.array(1, dtype=dtype)
-    parity = parity + np.count_nonzero(diag < 0)
+    parity = parity + np.count_nonzero(diag < 0, axis=-1)
   sign = np.where(is_zero,
                   np.array(0, dtype=dtype),
                   sign * np.array(-2 * (parity % 2) + 1, dtype=dtype))
@@ -83,6 +93,7 @@ def slogdet(a):
       is_zero, np.array(-np.inf, dtype=dtype),
       np.sum(np.log(np.abs(diag)), axis=-1))
   return sign, np.real(logdet)
+defjvp(slogdet, _jvp_slogdet)
 
 
 @_wraps(onp.linalg.det)
@@ -98,6 +109,12 @@ def eig(a):
   return w, vr
 
 
+@_wraps(onp.linalg.eigvals)
+def eigvals(a):
+  w, _ = eig(a)
+  return w
+
+
 @_wraps(onp.linalg.eigh)
 def eigh(a, UPLO=None, symmetrize_input=True):
   if UPLO is None or UPLO == "L":
@@ -111,6 +128,12 @@ def eigh(a, UPLO=None, symmetrize_input=True):
   a = _promote_arg_dtypes(np.asarray(a))
   v, w = lax_linalg.eigh(a, lower=lower, symmetrize_input=symmetrize_input)
   return w, v
+
+
+@_wraps(onp.linalg.eigvalsh)
+def eigvalsh(a, UPLO='L'):
+  w, _ = eigh(a, UPLO)
+  return w
 
 
 @_wraps(onp.linalg.inv)
@@ -158,8 +181,10 @@ def _norm(x, ord, axis, keepdims):
       # special case too.
       return np.sum(np.abs(x), axis=axis, keepdims=keepdims)
     else:
-      return np.power(np.sum(np.abs(x) ** ord, axis=axis, keepdims=keepdims),
-                      1. / ord)
+      abs_x = np.abs(x)
+      ord = lax._const(abs_x, ord)
+      out = np.sum(abs_x ** ord, axis=axis, keepdims=keepdims)
+      return np.power(out, 1. / ord)
 
   elif num_axes == 2:
     row_axis, col_axis = axis

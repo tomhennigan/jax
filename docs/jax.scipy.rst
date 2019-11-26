@@ -2,7 +2,7 @@ jax.scipy package
 =================
 
 jax.scipy.linalg
------------------------
+----------------
 
 .. automodule:: jax.scipy.linalg
 
@@ -15,8 +15,9 @@ jax.scipy.linalg
    det
    eigh
    inv
-   lu_factor
    lu
+   lu_factor
+   lu_solve
    qr
    solve
    solve_triangular
@@ -24,9 +25,18 @@ jax.scipy.linalg
    tril
    triu
 
+jax.scipy.ndimage
+-----------------
+
+.. automodule:: jax.scipy.ndimage
+
+.. autosummary::
+  :toctree: _autosummary
+
+   map_coordinates
 
 jax.scipy.special
-------------------------
+-----------------
 
 .. automodule:: jax.scipy.special
 
@@ -40,6 +50,8 @@ jax.scipy.special
    erfinv
    expit
    gammaln
+   i0e
+   i1e
    log_ndtr
    logit
    logsumexp
@@ -51,10 +63,10 @@ jax.scipy.special
 
 
 jax.scipy.stats
------------------------
+---------------
 
 jax.scipy.stats.beta
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~
 .. automodule:: jax.scipy.stats.beta
 
 .. autosummary::
@@ -64,7 +76,7 @@ jax.scipy.stats.beta
    pdf
 
 jax.scipy.stats.expon
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: jax.scipy.stats.expon
 .. autosummary::
   :toctree: _autosummary
@@ -73,7 +85,7 @@ jax.scipy.stats.expon
    pdf
 
 jax.scipy.stats.gamma
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: jax.scipy.stats.gamma
 .. autosummary::
   :toctree: _autosummary
@@ -82,7 +94,7 @@ jax.scipy.stats.gamma
    pdf
 
 jax.scipy.stats.laplace
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: jax.scipy.stats.laplace
 .. autosummary::
   :toctree: _autosummary
@@ -92,7 +104,7 @@ jax.scipy.stats.laplace
    pdf
 
 jax.scipy.stats.norm
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~
 .. automodule:: jax.scipy.stats.norm
 .. autosummary::
   :toctree: _autosummary
@@ -103,7 +115,7 @@ jax.scipy.stats.norm
    pdf
 
 jax.scipy.stats.uniform
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~
 .. automodule:: jax.scipy.stats.uniform
 .. autosummary::
   :toctree: _autosummary

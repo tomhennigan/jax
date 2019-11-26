@@ -16,9 +16,12 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import numpy as onp
+
 from jax.abstract_arrays import ShapedArray
 from jax.core import Primitive
 from jax.interpreters import xla
+from .. import dtypes
 from ..interpreters import ad
 from ..interpreters import batching
 
@@ -37,6 +40,11 @@ def fft_impl(x, fft_type, fft_lengths):
   return xla.apply_primitive(fft_p, x, fft_type=fft_type, fft_lengths=fft_lengths)
 
 def fft_abstract_eval(x, fft_type, fft_lengths):
+  if not dtypes.issubdtype(x.dtype, onp.complexfloating):
+    raise TypeError("FFT requires complex inputs, got {}.".format(x.dtype.name))
+  if x.dtype != onp.complex64:
+    msg = "FFT is only implemented for complex64 types, got {}."
+    raise NotImplementedError(msg.format(x.dtype.name))
   return ShapedArray(x.shape, x.dtype)
 
 def fft_translation_rule(c, x, fft_type, fft_lengths):
@@ -48,7 +56,7 @@ def fft_transpose_rule(t, fft_type, fft_lengths):
 def fft_batching_rule(batched_args, batch_dims, fft_type, fft_lengths):
   x, = batched_args
   bd, = batch_dims
-  x = batching.bdim_at_front(x, bd)
+  x = batching.moveaxis(x, bd, 0)
   return fft(x, fft_type, fft_lengths), 0
 
 fft_p = Primitive('fft')

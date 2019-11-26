@@ -69,7 +69,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import fastcache
+import weakref
 
 from .util import curry, partial
 
@@ -112,18 +112,6 @@ class Store(object):
   __bool__ = __nonzero__
 
 
-@curry
-def staged(f, *init_args):
-  store = Store()
-  def f_partial(*rest):
-    ans, aux = f(*(init_args + rest))
-    store.store(aux)
-    return ans
-
-  f_partial.__name__ = f.__name__ + "_staged"
-  return f_partial, thunk(lambda: store.val)
-
-
 class WrappedFun(object):
   """Represents a function `f` to which `transforms` are to be applied.
 
@@ -141,12 +129,16 @@ class WrappedFun(object):
     self.stores = stores
     self.params = params
 
+  @property
+  def __name__(self):
+    return getattr(self.f, '__name__', '<unnamed wrapped function>')
+
   def wrap(self, gen, gen_args, out_store):
     return WrappedFun(self.f, ((gen, gen_args),) + self.transforms,
                       (out_store,) + self.stores, self.params)
 
-  def populate_stores(self, other):
-    for self_store, other_store in zip(self.stores, other.stores):
+  def populate_stores(self, stores):
+    for self_store, other_store in zip(self.stores, stores):
       if self_store is not None:
         self_store.store(other_store.val)
 
@@ -204,15 +196,22 @@ def wrap_init(f, params={}):
   return WrappedFun(f, (), (), tuple(sorted(params.items())))
 
 
-def cache(call, max_size=4096):
-  @fastcache.clru_cache(maxsize=max_size)
-  def cached_fun_body(f, args):
-    return call(f, *args), f
-
-  def cached_fun(f, *args):
-    ans, f_prev = cached_fun_body(f, args)
-    if id(f_prev) != id(f):
-      f.populate_stores(f_prev)
+def cache(call):
+  fun_caches = weakref.WeakKeyDictionary()
+  def memoized_fun(fun, *args):
+    cache = fun_caches.setdefault(fun.f, {})
+    key = (fun.transforms, fun.params, args)
+    result = cache.get(key, None)
+    if result is not None:
+      ans, stores = result
+      fun.populate_stores(stores)
+    else:
+      ans = call(fun, *args)
+      cache[key] = (ans, fun.stores)
     return ans
+  return memoized_fun
 
-  return cached_fun
+@transformation
+def hashable_partial(x, *args):
+  ans = yield (x,) + args, {}
+  yield ans

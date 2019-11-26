@@ -26,13 +26,12 @@ Operators
     abs
     add
     acos
-    acosh
     asin
-    asinh
     atan
-    atanh
     atan2
     batch_matmul
+    bessel_i0e
+    bessel_i1e
     bitcast_convert_type
     bitwise_not
     bitwise_and
@@ -118,7 +117,6 @@ Operators
     sort_key_val
     sqrt
     square
-    stop_gradient
     sub
     tan
     tie_in
@@ -137,6 +135,15 @@ Control flow operators
     scan
     while_loop
 
+Custom gradient operators
+-------------------------
+
+.. autosummary::
+  :toctree: _autosummary
+
+    stop_gradient
+    custom_linear_solve
+    custom_root
 
 Parallel operators
 ------------------
@@ -146,7 +153,9 @@ Parallelism support is experimental.
 .. autosummary::
   :toctree: _autosummary
 
+    all_to_all
     psum
     pmax
     pmin
     ppermute
+    pswapaxes
